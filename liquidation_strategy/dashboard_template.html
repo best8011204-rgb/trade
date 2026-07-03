@@ -1,0 +1,549 @@
+<title>BTC 청산 흐름 전략 v1.0 — 알고리즘 검증 대시보드</title>
+<style>
+  :root {
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-a:       #2a78d6;  /* blue   — Setup A */
+    --series-b:       #1baf7a;  /* aqua   — Setup B */
+    --series-eq:      #4a3aa7;  /* violet — combined equity */
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --critical:       #d03b3b;
+    --serious:        #ec835a;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1:      #1a1a19;
+      --surface-2:      #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-a:       #3987e5;
+      --series-b:       #199e70;
+      --series-eq:      #9085e9;
+      --good:           #0ca30c;
+      --warning:        #fab219;
+      --critical:       #d03b3b;
+      --serious:        #ec835a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface-1:      #1a1a19;
+    --surface-2:      #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-a:       #3987e5;
+    --series-b:       #199e70;
+    --series-eq:      #9085e9;
+  }
+  :root[data-theme="light"] {
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-a:       #2a78d6;
+    --series-b:       #1baf7a;
+    --series-eq:      #4a3aa7;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 80px; }
+
+  header.hero { margin-bottom: 28px; }
+  header.hero h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; }
+  header.hero p.sub { color: var(--text-secondary); margin: 0 0 4px; font-size: 14px; }
+  header.hero p.meta { color: var(--text-muted); margin: 0; font-size: 12.5px; }
+
+  section { margin-bottom: 36px; }
+  h2.section-title {
+    font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-secondary); margin: 0 0 14px;
+  }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px;
+  }
+
+  /* ---- stat tiles ---- */
+  .tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .tile .value { font-size: 24px; font-weight: 650; }
+  .tile .value.good { color: var(--good); }
+  .tile .value.critical { color: var(--critical); }
+  .setup-block { margin-bottom: 18px; }
+  .setup-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .setup-head .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .setup-head h3 { font-size: 15px; margin: 0; }
+  .badge {
+    font-size: 11.5px; font-weight: 650; padding: 3px 9px; border-radius: 999px;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .badge.pass { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+  .badge.fail { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  /* ---- rule flow ---- */
+  .flow-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 860px) { .flow-grid { grid-template-columns: 1fr; } }
+  .flow-steps { display: flex; flex-direction: column; gap: 0; }
+  .flow-step {
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+    background: var(--surface-2); position: relative;
+  }
+  .flow-step + .flow-step { margin-top: 18px; }
+  .flow-step + .flow-step::before {
+    content: "↓"; position: absolute; top: -18px; left: 14px; color: var(--text-muted); font-size: 13px;
+  }
+  .flow-step .tag {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: 3px;
+  }
+  .flow-step .txt { font-size: 13px; color: var(--text-primary); }
+  .flow-step .param { font-size: 12px; color: var(--text-secondary); margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .flow-step.gate { border-color: color-mix(in srgb, var(--series-a) 40%, var(--border)); }
+  .flow-step.block { border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
+  .flow-step.entry { background: color-mix(in srgb, var(--good) 10%, var(--surface-2)); border-color: color-mix(in srgb, var(--good) 35%, var(--border)); }
+
+  /* ---- charts ---- */
+  .chart-card { position: relative; }
+  .chart-legend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+  .chart-legend .item { display: flex; align-items: center; gap: 6px; }
+  .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  svg.chart { width: 100%; height: auto; display: block; overflow: visible; }
+  .axis-label { fill: var(--text-muted); font-size: 10.5px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--text-primary); color: var(--surface-1);
+    font-size: 11.5px; padding: 6px 9px; border-radius: 7px; opacity: 0; transform: translate(-50%, -110%);
+    white-space: nowrap; z-index: 5; transition: opacity .08s;
+    font-variant-numeric: tabular-nums;
+  }
+  .crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; }
+
+  /* ---- tables ---- */
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.data-table th, table.data-table td {
+    text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid);
+    font-variant-numeric: tabular-nums;
+  }
+  table.data-table th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+  table.data-table tr.best { background: color-mix(in srgb, var(--good) 8%, transparent); }
+  .table-scroll { overflow-x: auto; }
+
+  .checklist { display: flex; flex-direction: column; gap: 8px; }
+  .check-row {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--border); font-size: 13px;
+  }
+  .check-row .icon { flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .check-row.ok .icon { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--good); }
+  .check-row.bad .icon { background: color-mix(in srgb, var(--critical) 18%, transparent); color: var(--critical); }
+  .check-row.na .icon { background: color-mix(in srgb, var(--text-muted) 18%, transparent); color: var(--text-muted); }
+  .check-row .rule { flex: 1; color: var(--text-primary); }
+  .check-row .val { color: var(--text-secondary); font-variant-numeric: tabular-nums; font-size: 12px; }
+
+  .cols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 860px) { .cols-2 { grid-template-columns: 1fr; } }
+
+  footer { color: var(--text-muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
+  code.inline { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+</style>
+
+<div class="wrap">
+  <header class="hero">
+    <h1>BTC 청산 흐름 전략 v1.0 — 사전등록 검증 대시보드</h1>
+    <p class="sub">Setup A: 청산 캐스케이드 소진 롱 · Setup B: 트랩드롱 플러시 숏 — 강제 청산 흐름을 수확하는 두 셋업의 트리거 로직, 임계값 캘리브레이션, 기각조건 판정 결과</p>
+    <p class="meta" id="metaLine"></p>
+  </header>
+
+  <section id="statsSection">
+    <h2 class="section-title">기각조건 판정 요약</h2>
+    <div id="statsGrid"></div>
+  </section>
+
+  <section>
+    <h2 class="section-title">트리거 로직 (사전등록 명세 그대로 구현)</h2>
+    <div class="flow-grid">
+      <div class="card">
+        <div class="setup-head"><span class="dot" style="background:var(--series-a)"></span><h3>Setup A — 캐스케이드 소진 롱</h3></div>
+        <div class="flow-steps" id="flowA"></div>
+      </div>
+      <div class="card">
+        <div class="setup-head"><span class="dot" style="background:var(--series-b)"></span><h3>Setup B — 트랩드롱 플러시 숏</h3></div>
+        <div class="flow-steps" id="flowB"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">가격 개요 &amp; 진입 시그널 (120일, 시간봉 다운샘플)</h2>
+    <div class="card chart-card">
+      <div id="priceChart"></div>
+      <div class="chart-legend">
+        <span class="item"><span class="swatch" style="background:var(--series-a)"></span>Setup A 진입 (롱)</span>
+        <span class="item"><span class="swatch" style="background:var(--series-b)"></span>Setup B 진입 (숏)</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">누적 기대값 (트레이드 순서, 비용 반영 bps)</h2>
+    <div class="card chart-card">
+      <div id="equityChart"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">개별 트레이드 예시</h2>
+    <div class="cols-2">
+      <div class="card chart-card">
+        <div class="setup-head"><span class="dot" style="background:var(--series-a)"></span><h3>Setup A 예시</h3></div>
+        <div id="sampleA"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="setup-head"><span class="dot" style="background:var(--series-b)"></span><h3>Setup B 예시</h3></div>
+        <div id="sampleB"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">임계값 캘리브레이션 (그리드서치 상위 결과)</h2>
+    <p class="meta" style="color:var(--text-muted); font-size:12.5px; margin:-4px 0 14px;">
+      명세서 4장 각주에 따라 진입/청산 구조는 고정하고 <b>트리거 감지 임계값만</b> 탐색했다. 초록 강조 행이 채택된 조합.
+    </p>
+    <div class="cols-2">
+      <div class="card table-scroll">
+        <h3 style="margin:0 0 10px; font-size:14px;">Setup A</h3>
+        <table class="data-table" id="gridTableA"></table>
+      </div>
+      <div class="card table-scroll">
+        <h3 style="margin:0 0 10px; font-size:14px;">Setup B</h3>
+        <table class="data-table" id="gridTableB"></table>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="section-title">기각 조건 상세 판정</h2>
+    <div class="cols-2">
+      <div class="card">
+        <h3 style="margin:0 0 10px; font-size:14px;">Setup A</h3>
+        <div class="checklist" id="rejectA"></div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 10px; font-size:14px;">Setup B</h3>
+        <div class="checklist" id="rejectB"></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    데이터는 실거래소 접속 없이 명세서의 트리거 정의(캐스케이드 두꺼운 꼬리, OI 유입-이탈 사이클)를 모사한 <b>합성 스트레스 시나리오</b>다.
+    파이프라인(<code class="inline">liquidation_strategy/</code>)의 탐지·집행·기각판정 로직은 실 스트림(Binance forceOrder / openInterest / aggTrade) 어댑터로 그대로 교체 가능하도록 설계되었다.
+    실거래 검증은 명세서 5장 절차(섀도 → 소액 라이브)를 따라야 한다.
+  </footer>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const DATA = __DATA_JSON__;
+
+function fmt(n, d=1) { return (n===null||n===undefined) ? "—" : Number(n).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function fmtDate(ts) {
+  const d = new Date(ts*1000);
+  return d.toISOString().slice(0,10);
+}
+function fmtDateTime(ts) {
+  const d = new Date(ts*1000);
+  return d.toISOString().slice(0,16).replace('T',' ');
+}
+function el(tag, attrs={}, children=[]) {
+  const ns = ["svg","path","line","circle","text","g","rect"].includes(tag) ? "http://www.w3.org/2000/svg" : null;
+  const e = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === "text") e.textContent = v; else e.setAttribute(k, v);
+  }
+  children.forEach(c => e.appendChild(c));
+  return e;
+}
+
+/* ---------------- META + STATS ---------------- */
+document.getElementById("metaLine").textContent =
+  `합성 데이터 ${DATA.meta.days}일 · 시드 ${DATA.meta.seed} · 분봉 ${DATA.meta.n_candles.toLocaleString()}개 · 왕복비용 가정 ${DATA.meta.roundtrip_cost_bps}bps · 주입된 캐스케이드 ${DATA.meta.n_injected_cascades}건 / 트랩 ${DATA.meta.n_injected_traps}건`;
+
+function renderStats() {
+  const grid = document.getElementById("statsGrid");
+  const cfg = [
+    {key:"A", name:"Setup A — 캐스케이드 소진 롱", color:"var(--series-a)"},
+    {key:"B", name:"Setup B — 트랩드롱 플러시 숏", color:"var(--series-b)"},
+  ];
+  cfg.forEach(c => {
+    const s = DATA.summary[c.key] || {};
+    const rej = DATA.rejection[c.key];
+    const block = el("div", {class:"setup-block"});
+    const head = el("div", {class:"setup-head"});
+    head.appendChild(el("span", {class:"dot", style:`background:${c.color}`}));
+    head.appendChild(el("h3", {text:c.name}));
+    const badge = el("span", {class:`badge ${rej.rejected ? "fail":"pass"}`, text: rej.rejected ? "기각 조건 충족 (v1.0 폐기 대상)" : "기각 조건 미충족 (진행 가능)"});
+    head.appendChild(badge);
+    block.appendChild(head);
+
+    const tiles = el("div", {class:"tile-grid"});
+    const items = [
+      ["표본 수", (s.count ?? 0) + "건", null],
+      ["승률", s.count ? fmt(s.win_rate*100,1)+"%" : "—", null],
+      ["평균 기대값", s.count ? fmt(s.avg_bps,1)+"bps" : "—", s.avg_bps>0 ? "good":"critical"],
+      ["평균 R", s.count ? fmt(s.avg_r,2)+"R" : "—", s.avg_r>1 ? "good": null],
+      ["최대 연속손실", (s.max_consec_losses ?? "—") + "회", null],
+    ];
+    items.forEach(([label,value,cls]) => {
+      const t = el("div", {class:"tile"});
+      t.appendChild(el("div", {class:"label", text:label}));
+      t.appendChild(el("div", {class:"value" + (cls?(" "+cls):""), text:value}));
+      tiles.appendChild(t);
+    });
+    block.appendChild(tiles);
+    grid.appendChild(block);
+  });
+}
+renderStats();
+
+/* ---------------- RULE FLOW ---------------- */
+function renderFlow(containerId, steps) {
+  const c = document.getElementById(containerId);
+  steps.forEach(s => {
+    const step = el("div", {class:`flow-step ${s.cls||""}`});
+    step.appendChild(el("div", {class:"tag", text:s.tag}));
+    step.appendChild(el("div", {class:"txt", text:s.txt}));
+    if (s.param) step.appendChild(el("div", {class:"param", text:s.param}));
+    c.appendChild(step);
+  });
+}
+
+const pa = DATA.optimized_params.A, pb = DATA.optimized_params.B;
+renderFlow("flowA", [
+  {tag:"T1 · 캐스케이드 감지", txt:"60초 내 SELL 청산 합계 ≥ 시간당 평균 × N, 최소 3건 연쇄", param:`캘리브레이션: N = ${pa.vol_multiplier}× (그리드서치)`},
+  {tag:"T2 · 가격 이탈", txt:"캐스케이드 시작 대비 하락폭 확인", param:`캘리브레이션: ≥ ${(pa.min_move_pct*100).toFixed(2)}%`},
+  {tag:"T3 · 소진 확인 (진입 게이트)", txt:"무청산 경과 + 1분 CVD 음→양 전환 + 저점 대비 반등 유지", param:`무청산 ${pa.exhaustion_gap_s}s · 반등 ${(pa.rebound_pct*100).toFixed(2)}% · 유지 30s`, cls:"gate"},
+  {tag:"T4 · 차단", txt:"FOMC/CPI ±30분 매크로 블랙아웃이면 진입 금지", cls:"block"},
+  {tag:"진입", txt:"시장가 롱 1트랜치 · SL = 저점−0.15% · TP1 38% / TP2 61.8% 되돌림 · 90분 시간청산 · 재진입 1회", cls:"entry"},
+]);
+renderFlow("flowB", [
+  {tag:"T1 · 미끼 국면", txt:"4h 박스 상단 돌파 + 돌파구간 OI 증가 확인 (없으면 숏커버 랠리로 제외)", param:`캘리브레이션: OI ≥ +${(pb.oi_increase_pct*100).toFixed(2)}%`},
+  {tag:"T2 · 트랩 확정", txt:"박스 상단 아래로 복귀 + 재탈환 시도 실패", param:`캘리브레이션: 재탈환 허용 ${Math.round(pb.retest_window_s/60)}분`, cls:"gate"},
+  {tag:"T3 · 연료 확인", txt:"돌파 유입 OI가 아직 청산되지 않았는지 확인 (회귀 시 셋업 무효)"},
+  {tag:"무효화", txt:"진입 전 OI 급감(트랩 롱 자발 탈출) 시 셋업 취소", cls:"block"},
+  {tag:"진입", txt:"2트랜치(복귀확인 50% / 리테스트실패 50%) · SL = sweep high+0.1% · TP1 박스중앙 · TP2 청산클러스터 추정가 · 8h 시간청산", cls:"entry"},
+]);
+
+/* ---------------- CHART ENGINE ---------------- */
+const tooltip = document.getElementById("tooltip");
+
+function lineChart(container, series, opts) {
+  const W = 900, H = 260, PAD = {l:52, r:16, t:16, b:28};
+  const xs = series.map(d => opts.x(d));
+  const ys = series.map(d => opts.y(d));
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  if (opts.yMin !== undefined) yMin = Math.min(yMin, opts.yMin);
+  if (opts.yMax !== undefined) yMax = Math.max(yMax, opts.yMax);
+  const pad = (yMax - yMin) * 0.08 || 1;
+  yMin -= pad; yMax += pad;
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+
+  const sx = v => PAD.l + (v - xMin) / (xMax - xMin || 1) * (W - PAD.l - PAD.r);
+  const sy = v => H - PAD.b - (v - yMin) / (yMax - yMin || 1) * (H - PAD.t - PAD.b);
+
+  const svg = el("svg", {class:"chart", viewBox:`0 0 ${W} ${H}`});
+
+  // gridlines (4 horizontal)
+  const nY = 4;
+  for (let i=0;i<=nY;i++) {
+    const v = yMin + (yMax-yMin)*i/nY;
+    const y = sy(v);
+    svg.appendChild(el("line", {class:"gridline", x1:PAD.l, x2:W-PAD.r, y1:y, y2:y}));
+    svg.appendChild(el("text", {class:"axis-label", x:6, y:y+3, text: opts.yFmt ? opts.yFmt(v) : fmt(v,0)}));
+  }
+  // x axis ticks: start, mid, end
+  [0, 0.5, 1].forEach(f => {
+    const v = xMin + (xMax-xMin)*f;
+    const x = sx(v);
+    svg.appendChild(el("text", {class:"axis-label", x: f===1? x-60:x, y:H-6, "text-anchor": f===0?"start":(f===1?"end":"middle"), text: opts.xFmt ? opts.xFmt(v) : fmt(v,0)}));
+  });
+  svg.appendChild(el("line", {class:"baseline", x1:PAD.l, x2:W-PAD.r, y1:H-PAD.b, y2:H-PAD.b}));
+
+  // path
+  let d = "";
+  series.forEach((pt,i) => {
+    const x = sx(opts.x(pt)), y = sy(opts.y(pt));
+    d += (i===0 ? "M":"L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+  });
+  svg.appendChild(el("path", {d, fill:"none", stroke: opts.color || "var(--series-a)", "stroke-width":2, "stroke-linejoin":"round", "stroke-linecap":"round"}));
+
+  // markers
+  (opts.markers || []).forEach(m => {
+    const x = sx(m.x), y = sy(m.y);
+    svg.appendChild(el("circle", {cx:x, cy:y, r:5, fill:m.color, stroke:"var(--surface-1)", "stroke-width":2}));
+  });
+
+  // hover layer
+  const crosshair = el("line", {class:"crosshair", x1:0,x2:0,y1:PAD.t,y2:H-PAD.b});
+  svg.appendChild(crosshair);
+  const hoverDot = el("circle", {r:4.5, fill: opts.color || "var(--series-a)", stroke:"var(--surface-1)", "stroke-width":2, opacity:0});
+  svg.appendChild(hoverDot);
+  const overlay = el("rect", {x:PAD.l, y:PAD.t, width: W-PAD.l-PAD.r, height: H-PAD.t-PAD.b, fill:"transparent"});
+  svg.appendChild(overlay);
+
+  const wrapper = el("div", {style:"position:relative;"});
+  wrapper.appendChild(svg);
+  container.appendChild(wrapper);
+
+  overlay.addEventListener("mousemove", (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = (ev.clientX - rect.left) / rect.width * W;
+    const xv = xMin + (px - PAD.l) / (W-PAD.l-PAD.r) * (xMax-xMin);
+    let lo = 0, hi = series.length-1;
+    let best = 0, bestDist = Infinity;
+    for (let i=0;i<series.length;i++) {
+      const dist = Math.abs(opts.x(series[i]) - xv);
+      if (dist < bestDist) { bestDist = dist; best = i; }
+    }
+    const pt = series[best];
+    const x = sx(opts.x(pt)), y = sy(opts.y(pt));
+    crosshair.setAttribute("x1", x); crosshair.setAttribute("x2", x);
+    crosshair.style.opacity = 1;
+    hoverDot.setAttribute("cx", x); hoverDot.setAttribute("cy", y); hoverDot.style.opacity = 1;
+    tooltip.style.opacity = 1;
+    tooltip.style.left = rect.left + window.scrollX + (x/W)*rect.width + "px";
+    tooltip.style.top = rect.top + window.scrollY + (y/H)*rect.height + "px";
+    tooltip.innerHTML = opts.tooltip ? opts.tooltip(pt) : fmt(opts.y(pt));
+  });
+  overlay.addEventListener("mouseleave", () => {
+    crosshair.style.opacity = 0; hoverDot.style.opacity = 0; tooltip.style.opacity = 0;
+  });
+
+  return {sx, sy, W, H, PAD};
+}
+
+/* ---- price overview ---- */
+const priceMarkersA = DATA.trades.filter(t=>t.setup==="A" && t.reason).map(t=>({x:t.entry_ts, price:t.entry_price}));
+const priceMarkersB = DATA.trades.filter(t=>t.setup==="B" && t.reason).map(t=>({x:t.entry_ts, price:t.entry_price}));
+// dedupe entries per tag (multiple legs share entry) already fine since separate legs have distinct entry_ts sometimes; use set by tag+entry_ts
+function dedupe(arr) {
+  const seen = new Set(); const out=[];
+  arr.forEach(m => { const k = m.x+","+m.price; if(!seen.has(k)){seen.add(k); out.push(m);} });
+  return out;
+}
+const markers = [
+  ...dedupe(priceMarkersA).map(m=>({x:m.x, y:m.price, color:"var(--series-a)"})),
+  ...dedupe(priceMarkersB).map(m=>({x:m.x, y:m.price, color:"var(--series-b)"})),
+];
+lineChart(document.getElementById("priceChart"), DATA.price_overview, {
+  x: d=>d.ts, y: d=>d.close, color:"var(--text-secondary)",
+  xFmt: fmtDate, yFmt: v=>fmt(v,0),
+  markers,
+  tooltip: d => `${fmtDateTime(d.ts)}<br>BTC $${fmt(d.close,0)}`,
+});
+
+/* ---- equity curve ---- */
+lineChart(document.getElementById("equityChart"), DATA.equity_curve, {
+  x: d=>d.n, y: d=>d.cum_bps, color:"var(--series-eq)", yMin:0,
+  xFmt: v=>`#${Math.round(v)}`, yFmt: v=>fmt(v,0)+"bps",
+  tooltip: d => `트레이드 #${d.n} (${d.setup})<br>누적 ${fmt(d.cum_bps,1)}bps · ${fmtDateTime(d.ts)}`,
+});
+
+/* ---- sample trade windows ---- */
+function renderSample(containerId, window_, trade, slFn) {
+  const c = document.getElementById(containerId);
+  if (!window_ || !window_.length || !trade) { c.appendChild(el("p",{style:"color:var(--text-muted);font-size:13px;", text:"표본 트레이드 없음"})); return; }
+  const {sx, sy, W, H, PAD} = lineChart(c, window_, {
+    x: d=>d.ts, y: d=>d.close, color:"var(--text-secondary)",
+    xFmt: fmtDateTime, yFmt: v=>fmt(v,0),
+    tooltip: d => `${fmtDateTime(d.ts)}<br>$${fmt(d.close,0)}`,
+  });
+  const svg = c.querySelector("svg");
+  function hline(y, color, label) {
+    const yy = sy(y);
+    svg.appendChild(el("line", {x1:PAD.l, x2:W-PAD.r, y1:yy, y2:yy, stroke:color, "stroke-width":1.5, "stroke-dasharray":"4 3"}));
+    svg.appendChild(el("text", {x:W-PAD.r-4, y:yy-4, "text-anchor":"end", class:"axis-label", fill:color, text:label}));
+  }
+  hline(trade.entry_price, trade.side==="LONG"?"var(--series-a)":"var(--series-b)", `진입 $${fmt(trade.entry_price,0)}`);
+  if (trade.exit_price) hline(trade.exit_price, trade.reason==="SL"?"var(--critical)":"var(--good)", `${trade.reason} $${fmt(trade.exit_price,0)}`);
+  const info = el("p", {style:"font-size:12.5px; color:var(--text-secondary); margin-top:10px;",
+    text:`${trade.tag} · ${trade.side} · 진입 ${fmtDateTime(trade.entry_ts)} → 청산 ${fmtDateTime(trade.exit_ts)} (${trade.reason}) · ${fmt(trade.bps,1)}bps / ${fmt(trade.r_multiple,2)}R`});
+  c.appendChild(info);
+}
+renderSample("sampleA", DATA.sample_window_a, DATA.sample_trade_a);
+renderSample("sampleB", DATA.sample_window_b, DATA.sample_trade_b);
+
+/* ---------------- GRID SEARCH TABLES ---------------- */
+function renderGrid(tableId, results, bestParams, paramKeys) {
+  const table = document.getElementById(tableId);
+  const sorted = [...results].filter(r=>r.stats && r.stats.count).sort((a,b)=> (b.stats.avg_bps??-1e9) - (a.stats.avg_bps??-1e9)).slice(0,8);
+  const thead = el("thead");
+  const hrow = el("tr");
+  paramKeys.forEach(k => hrow.appendChild(el("th", {text:k})));
+  ["표본","승률","평균bps","평균R"].forEach(h => hrow.appendChild(el("th", {text:h})));
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  sorted.forEach(r => {
+    const isBest = paramKeys.every(k => r.params[k] === bestParams[k]);
+    const row = el("tr", {class: isBest ? "best" : ""});
+    paramKeys.forEach(k => row.appendChild(el("td", {text: String(r.params[k])})));
+    row.appendChild(el("td", {text: r.stats.count}));
+    row.appendChild(el("td", {text: fmt(r.stats.win_rate*100,1)+"%"}));
+    row.appendChild(el("td", {text: fmt(r.stats.avg_bps,1)}));
+    row.appendChild(el("td", {text: fmt(r.stats.avg_r,2)}));
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+}
+renderGrid("gridTableA", DATA.grid_search.A, DATA.optimized_params.A, ["vol_multiplier","min_move_pct","exhaustion_gap_s","rebound_pct"]);
+renderGrid("gridTableB", DATA.grid_search.B, DATA.optimized_params.B, ["oi_increase_pct","retest_window_s"]);
+
+/* ---------------- REJECTION CHECKLIST ---------------- */
+function renderChecklist(containerId, checks) {
+  const c = document.getElementById(containerId);
+  checks.forEach(ch => {
+    const cls = !ch.applicable ? "na" : (ch.failed ? "bad" : "ok");
+    const row = el("div", {class:`check-row ${cls}`});
+    row.appendChild(el("div", {class:"icon", text: !ch.applicable ? "–" : (ch.failed ? "✕" : "✓")}));
+    const rule = el("div", {class:"rule"});
+    rule.appendChild(document.createTextNode(ch.rule));
+    row.appendChild(rule);
+    row.appendChild(el("div", {class:"val", text: ch.applicable ? ch.value : "표본 미도달"}));
+    c.appendChild(row);
+  });
+}
+renderChecklist("rejectA", DATA.rejection.A.checks);
+renderChecklist("rejectB", DATA.rejection.B.checks);
+</script>
