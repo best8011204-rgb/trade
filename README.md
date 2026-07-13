@@ -17,12 +17,18 @@
 ```bash
 pip install -r requirements.txt
 python3 -m liquidation_strategy.run                # liquidation_strategy_output.json 생성
-python3 -m liquidation_strategy.build_dashboard     # liquidation_strategy_dashboard.html 생성
+python3 -m liquidation_strategy.gui --open          # GUI 서버 (http://127.0.0.1:8760)
 ```
 
-`liquidation_strategy_dashboard.html`을 브라우저로 열면 트리거 로직 다이어그램,
-가격/진입 시그널 차트, 누적 기대값, 임계값 캘리브레이션 결과, 기각조건 판정을
-확인할 수 있다.
+`gui.py`는 표준 라이브러리만 쓰는 프론트엔드 서버로, 매 요청마다 산출물
+JSON을 다시 읽어 터미널형 대시보드(좌: 파라미터/그리드서치, 중앙: 차트,
+우상: 전략 로직, 우하: 결과/기각판정)에 주입한다. `run.py`·`live_feed.py`·
+`backfill.py`가 JSON을 갱신하면 **열려 있는 브라우저가 자동 리로드**된다.
+
+```bash
+python3 -m liquidation_strategy.gui --data liquidation_strategy_output_live.json  # 라이브 스냅샷 바인딩
+python3 -m liquidation_strategy.build_dashboard     # (선택) 정적 단일 HTML 내보내기
+```
 
 ## 실데이터 연동
 
@@ -50,16 +56,11 @@ python3 -m liquidation_strategy.live_feed
 과탐지/과소탐지가 있을 수 있다 — 명세서 4장의 "캘리브레이션 필요" 주의사항과
 같은 맥락이다.
 
-대시보드에 실시간 결과를 반영하려면:
+대시보드에 실시간 결과를 반영하려면 GUI 서버를 라이브 스냅샷에 바인딩하면 된다
+(스냅샷이 갱신될 때마다 브라우저 자동 리로드):
 
 ```bash
-python3 -c "
-import json
-data = json.load(open('liquidation_strategy_output_live.json'))
-tmpl = open('liquidation_strategy/dashboard_template.html').read()
-open('liquidation_strategy_dashboard_live.html','w').write(
-    tmpl.replace('__DATA_JSON__', json.dumps(data, ensure_ascii=False)))
-"
+python3 -m liquidation_strategy.gui --data liquidation_strategy_output_live.json --open
 ```
 
 ### 2) Setup B 과거 데이터 백테스트 (실데이터)
