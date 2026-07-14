@@ -18,7 +18,7 @@ POLL_MS = 100
 
 
 class MainWindow:
-    def __init__(self, root):
+    def __init__(self, root, autostart_live=False):
         self.root = root
         self.root.title("청산 흐름 전략 — 실시간 대시보드 (섀도 전용, 실주문 없음)")
         self.root.geometry("980x760")
@@ -39,6 +39,9 @@ class MainWindow:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll()
+
+        if autostart_live:
+            self.trading.start_live()
 
     def _poll(self):
         self.bus.dispatch()

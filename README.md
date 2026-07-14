@@ -30,6 +30,21 @@ python3 -m liquidation_strategy.gui --data liquidation_strategy_output_live.json
 python3 -m liquidation_strategy.build_dashboard     # (선택) 정적 단일 HTML 내보내기
 ```
 
+## Tkinter GUI (한 번에 실행: GUI + 실시간 live_feed)
+
+```bash
+pip install -r requirements.txt
+python3 run_all.py                 # GUI를 띄우고 Live 모드로 자동 연결 시작
+python3 run_all.py --synthetic     # 자동 연결 없이 합성 데이터 모드로 대기 (수동 Start)
+```
+
+`run_all.py`(= `python3 -m gui.app`과 동일)는 창이 뜨는 즉시 `gui/` 패키지의
+BotController가 Live 모드(Binance 실시간 웹소켓 섀도, 실주문 없음)로
+`live_feed`를 자동으로 시작한다 — Trading 탭에서 따로 Start를 누를 필요가
+없다. Dashboard 탭에서 실시간 캔들차트/포지션/누적 PnL을, Log 탭에서 시그널
+스트림을 바로 확인할 수 있다. 인터넷이 열린 로컬 PC/VPS에서 실행해야 실제로
+데이터가 들어온다.
+
 ## 실데이터 연동
 
 `binance_client.py`(REST) / `live_feed.py`(실시간 웹소켓)가 실제 Binance

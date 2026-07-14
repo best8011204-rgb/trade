@@ -92,6 +92,12 @@ class TradingPage:
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
 
+    def start_live(self):
+        """프로그램 시작 시 자동으로 Live 모드를 켤 때 쓰는 진입점."""
+        self.mode_var.set("live")
+        self._on_mode_change()
+        self._start()
+
     def _stop(self):
         self.controller.stop()
         self.btn_stop.config(state="disabled")
