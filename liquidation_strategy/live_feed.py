@@ -1,12 +1,19 @@
 """실시간 Binance 선물 스트림 -> StrategyEngine -> 섀도(가상 체결) 로깅.
 
 명세서 5장 1단계("섀도 단계: 라이브 스트림에서 시그널만 기록, 가상 체결")를
-그대로 구현한다. 실제 주문을 내지 않는다 — forceOrder/aggTrade/kline_1m
+그대로 구현한다. 실제 주문을 내지 않는다 — forceOrder/aggTrade/kline
 웹소켓과 openInterest REST 폴링을 엔진에 연결해 트리거·체결을 계산만 하고
 JSONL로 기록한다.
 
-이 세션의 샌드박스는 WebSocket 업그레이드와 fapi.binance.com 아웃바운드가
-막혀 있어 여기서 직접 실행할 수 없다. 인터넷이 열린 로컬 머신/서버에서:
+[v2 변경점]
+- kline 구독을 1m 단일에서 KLINE_INTERVALS = (1m, 5m, 1h, 1d) 멀티로 확장.
+  * 엔진(StrategyEngine)은 여전히 1m 확정봉만 소비한다 (전략 로직 불변).
+  * 5m/1h/1d 확정봉은 GUI 차트 표시 전용이며, on_display_candle 훅이
+    설정된 경우에만 전달된다 (훅 미설정 시 기존과 100% 동일하게 동작).
+- on_display_candle(interval: str, candle: dict) 훅 추가. GUI 브리지
+  (gui/live_engine_bridge.py)가 이 훅에 EventBus.publish를 꽂는다.
+
+이 코드는 인터넷이 열린 로컬 머신/서버에서 실행해야 한다:
 
     pip install -r requirements.txt
     python3 -m liquidation_strategy.live_feed
@@ -34,6 +41,7 @@ from .report import build_report
 
 STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
 SYMBOL = "btcusdt"
+KLINE_INTERVALS = ("1m", "5m", "1h", "1d")   # 1m=엔진+차트, 나머지=차트 전용
 BOX_WINDOW_MIN = 240        # 4h 박스
 BASELINE_WINDOW_S = 24 * 3600
 OI_POLL_S = 300              # 5분
@@ -81,6 +89,10 @@ class LiveShadowRunner:
         self._a_log_seen = 0
         self._b_log_seen = 0
 
+        # GUI 표시 전용 훅. 시그니처: fn(interval: str, candle: dict)
+        # candle dict: {ts, open, high, low, close, volume, closed: True}
+        self.on_display_candle = None
+
         self.event_log_path = os.path.join(log_dir, "raw_events.jsonl")
         self.trade_log_path = os.path.join(log_dir, "shadow_trades.jsonl")
         self.signal_log_path = os.path.join(log_dir, "signals.jsonl")
@@ -110,23 +122,42 @@ class LiveShadowRunner:
         self.cvd_accum += delta
 
     def on_kline_msg(self, data):
+        """모든 kline 스트림(1m/5m/1h/1d)의 공용 진입점.
+
+        - 확정(닫힌) 봉만 처리한다 (k["x"] == True).
+        - interval == "1m" 이면 기존 엔진 경로를 그대로 태운다.
+        - 모든 interval은 on_display_candle 훅(설정 시)으로 전달된다.
+        """
         k = data["k"]
         if k["s"] != self.symbol.upper() or not k["x"]:
-            return  # 확정(닫힌) 1분봉만 사용
-        c = Candle(ts=k["t"] / 1000.0, open=float(k["o"]), high=float(k["h"]),
-                   low=float(k["l"]), close=float(k["c"]), volume=float(k["v"]),
-                   cvd_delta=self.cvd_accum)
-        self.engine.a.on_cvd_delta(c.ts, self.cvd_accum)
-        self.cvd_accum = 0.0
+            return  # 확정(닫힌) 봉만 사용
+        interval = k["i"]
+        candle_dict = {
+            "ts": k["t"] / 1000.0, "open": float(k["o"]), "high": float(k["h"]),
+            "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]),
+            "closed": True,
+        }
+        if interval == "1m":
+            c = Candle(ts=candle_dict["ts"], open=candle_dict["open"], high=candle_dict["high"],
+                       low=candle_dict["low"], close=candle_dict["close"],
+                       volume=candle_dict["volume"], cvd_delta=self.cvd_accum)
+            self.engine.a.on_cvd_delta(c.ts, self.cvd_accum)
+            self.cvd_accum = 0.0
 
-        self.candles.append(c)
-        lo = max(0, len(self.candles) - BOX_WINDOW_MIN)
-        window = list(self.candles)[lo:]
-        box_low = min(x.low for x in window)
-        box_high = max(x.high for x in window)
-        self.engine.set_box(box_low, box_high)
-        self.engine.on_candle(c, oi_now=self._latest_oi)
-        self._flush_new_logs()
+            self.candles.append(c)
+            lo = max(0, len(self.candles) - BOX_WINDOW_MIN)
+            window = list(self.candles)[lo:]
+            box_low = min(x.low for x in window)
+            box_high = max(x.high for x in window)
+            self.engine.set_box(box_low, box_high)
+            self.engine.on_candle(c, oi_now=self._latest_oi)
+            self._flush_new_logs()
+
+        if self.on_display_candle is not None:
+            try:
+                self.on_display_candle(interval, candle_dict)
+            except Exception as e:  # 표시 훅 오류가 엔진을 죽이면 안 된다
+                print(f"[display_hook] error: {e}", file=sys.stderr)
 
     _latest_oi = None
 
@@ -189,8 +220,15 @@ async def snapshot_loop(runner: LiveShadowRunner):
             print(f"[snapshot] error: {e}", file=sys.stderr)
 
 
+def build_stream_names(symbol: str):
+    """구독할 combined stream 이름 목록. kline은 KLINE_INTERVALS 전체."""
+    names = [f"{symbol}@forceOrder", f"{symbol}@aggTrade"]
+    names += [f"{symbol}@kline_{iv}" for iv in KLINE_INTERVALS]
+    return names
+
+
 async def stream_loop(runner: LiveShadowRunner, symbol: str):
-    streams = f"{symbol}@forceOrder/{symbol}@aggTrade/{symbol}@kline_1m"
+    streams = "/".join(build_stream_names(symbol))
     url = STREAM_URL.format(streams=streams)
     backoff = 1
     while True:
@@ -205,8 +243,10 @@ async def stream_loop(runner: LiveShadowRunner, symbol: str):
                         runner.on_force_order_msg(data)
                     elif stream.endswith("@aggTrade"):
                         runner.on_agg_trade_msg(data)
-                    elif stream.endswith("@kline_1m"):
+                    elif "@kline_" in stream:
                         runner.on_kline_msg(data)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             print(f"[stream] disconnected ({e}), retry in {backoff}s", file=sys.stderr)
             await asyncio.sleep(backoff)
