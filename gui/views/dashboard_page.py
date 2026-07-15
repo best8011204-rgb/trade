@@ -6,6 +6,8 @@
 - "candle":         1m 확정봉 (텍스트 라벨 + 합성 모드 차트 집계 입력)
 - "candle_tf":      라이브 모드의 타임프레임별(1m/5m/1h/1d) 네이티브 확정봉
 - "candle_history": 라이브 시작 시 REST 백필 (타임프레임별 일괄 초기화)
+- "oi":             OI 포인트 (라이브 5분 폴링 / 합성 oi_points) -> 라벨+서브차트
+- "oi_history":     라이브 시작 시 OI 히스토리 REST 백필
 - "status"/"position"/"summary": 기존과 동일
 """
 
@@ -29,6 +31,8 @@ class DashboardPage:
         self.price_label.pack(side="left", padx=20)
         self.box_label = ttk.Label(top, text="박스(4h): -")
         self.box_label.pack(side="left", padx=20)
+        self.oi_label = ttk.Label(top, text="OI: -", foreground="#b8860b")
+        self.oi_label.pack(side="left", padx=20)
 
         # ---- 실시간 캔들차트 ----
         self.chart = CandleChart(self.frame, height=300)
@@ -48,6 +52,8 @@ class DashboardPage:
         bus.subscribe("candle", self._on_candle)
         bus.subscribe("candle_tf", self._on_candle_tf)
         bus.subscribe("candle_history", self._on_candle_history)
+        bus.subscribe("oi", self._on_oi)
+        bus.subscribe("oi_history", self._on_oi_history)
         bus.subscribe("position", self.positions.update_positions)
         bus.subscribe("summary", self.pnl.update_summary)
 
@@ -72,3 +78,15 @@ class DashboardPage:
 
     def _on_candle_history(self, data):
         self.chart.set_history(data["interval"], data["candles"])
+
+    def _on_oi(self, data):
+        from gui.widgets.candle_chart import _fmt_oi
+        self.oi_label.config(text=f"OI: {_fmt_oi(data['oi'])}")
+        self.chart.add_oi(data["ts"], data["oi"])
+
+    def _on_oi_history(self, data):
+        from gui.widgets.candle_chart import _fmt_oi
+        points = data["points"]
+        self.chart.set_oi_history(points)
+        if points:
+            self.oi_label.config(text=f"OI: {_fmt_oi(points[-1][1])}")

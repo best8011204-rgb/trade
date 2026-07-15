@@ -106,6 +106,14 @@ class LiveEngineRunner:
             self._flush_signals()
         self.runner.on_force_order_msg = on_force_order_msg
 
+        # 4) OI 5분 폴링 -> "oi" (대시보드 OI 서브차트/라벨)
+        orig_on_oi = self.runner.on_oi_poll
+
+        def on_oi_poll(oi_value, ts):
+            orig_on_oi(oi_value, ts)
+            self.bus.publish("oi", {"ts": ts, "oi": oi_value})
+        self.runner.on_oi_poll = on_oi_poll
+
     def _flush_trades(self):
         trades = self.runner.engine.closed_trades
         while self._n_closed_seen < len(trades):
@@ -218,6 +226,16 @@ class LiveEngineRunner:
                 for k in raw if float(k[6]) <= now_ms  # closeTime 지난 봉만 = 확정봉
             ]
             self.bus.publish("candle_history", {"interval": interval, "candles": candles})
+
+        # OI 히스토리 (5분 주기): 실패해도 라이브 폴링으로 채워지므로 치명적이지 않다
+        try:
+            hist = bc.get_open_interest_hist(self.symbol, period="5m", limit=HISTORY_LIMIT)
+            points = [(float(o["timestamp"]) / 1000.0, float(o["sumOpenInterest"]))
+                      for o in hist]
+            if points:
+                self.bus.publish("oi_history", {"points": points})
+        except Exception as e:
+            print(f"[live_runner] OI 히스토리 백필 실패(비치명): {e}", file=sys.stderr)
 
 
 def _serialize_legs(open_legs):
