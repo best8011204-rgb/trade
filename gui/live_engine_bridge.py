@@ -35,6 +35,8 @@ from liquidation_strategy.setup_b import CascadeBParams
 
 HISTORY_LIMIT = 300           # 시작 시 interval별 REST 백필 봉 수 (차트 초기 표시용)
 SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
+REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
+OI_DISPLAY_POLL_S = 60        # GUI 표시용 OI 폴링 주기 (엔진용 5분 폴링과 별개)
 
 
 class LiveEngineRunner:
@@ -184,7 +186,7 @@ class LiveEngineRunner:
         # 2) 웹소켓 스트림: 자체 asyncio 루프
         self.bus.publish("status", {
             "running": True, "connected": True,
-            "message": f"실시간 스트림 연결 (섀도 모드, 실주문 없음) — {self.symbol}",
+            "message": f"실시간 연결 (웹소켓 + 1분 REST 폴백, 섀도 모드, 실주문 없음) — {self.symbol}",
         })
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -193,6 +195,8 @@ class LiveEngineRunner:
                 stream_loop(self.runner, self.runner.symbol),
                 oi_poll_loop(self.runner, self.runner.symbol),
                 snapshot_loop(self.runner),
+                self._rest_kline_poll_loop(),
+                self._oi_display_poll_loop(),
             ))
         except asyncio.CancelledError:
             pass
@@ -208,6 +212,57 @@ class LiveEngineRunner:
                 "running": False, "connected": False,
                 "message": "정지됨" if self._stopping.is_set() else "스트림 종료",
             })
+
+    async def _rest_kline_poll_loop(self):
+        """웹소켓이 막힌 환경 폴백: 1분마다 확정봉을 REST로 받아 동일 경로에 주입.
+
+        - 각 타임프레임 최근 2봉을 조회해 '아직 처리 안 된 확정봉'만
+          runner.on_kline_msg(웹소켓과 동일한 메시지 형태)로 흘린다.
+        - 1m 중복 방지: runner.candles[-1].ts 이하는 스킵 (웹소켓이 정상이면
+          이 폴링은 사실상 아무 것도 주입하지 않는다).
+        - 5m/1h/1d는 표시 전용이며 차트가 같은 ts 봉을 교체 처리하므로
+          웹소켓과 겹쳐도 무해하다.
+        """
+        loop = asyncio.get_running_loop()
+        last_ts = {iv: None for iv in KLINE_INTERVALS}
+        while True:
+            await asyncio.sleep(REST_POLL_S)
+            for iv in KLINE_INTERVALS:
+                try:
+                    raw = await loop.run_in_executor(
+                        None, lambda iv=iv: bc.get_klines(self.symbol, interval=iv, limit=2))
+                except Exception as e:
+                    print(f"[rest_poll] {iv} error: {e}", file=sys.stderr)
+                    break  # 네트워크 문제면 이번 라운드 전체 스킵
+                now_ms = time.time() * 1000
+                for k in raw:
+                    if float(k[6]) > now_ms:
+                        continue  # 미확정(진행 중) 봉 제외
+                    ts = k[0] / 1000.0
+                    if iv == "1m":
+                        if self.runner.candles and ts <= self.runner.candles[-1].ts:
+                            continue  # 웹소켓/이전 폴링이 이미 처리한 봉
+                    elif last_ts[iv] is not None and ts <= last_ts[iv]:
+                        continue
+                    last_ts[iv] = ts
+                    self.runner.on_kline_msg({"k": {
+                        "s": self.symbol, "i": iv, "x": True, "t": k[0],
+                        "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
+                    }})
+
+    async def _oi_display_poll_loop(self):
+        """GUI 표시용 OI 1분 폴링. 엔진에는 넣지 않는다 —
+        엔진용 OI는 기존 oi_poll_loop(5분)가 그대로 담당한다 (전략 로직 불변).
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(OI_DISPLAY_POLL_S)
+            try:
+                data = await loop.run_in_executor(
+                    None, bc.get_open_interest, self.symbol)
+                self.bus.publish("oi", {"ts": time.time(), "oi": float(data["openInterest"])})
+            except Exception as e:
+                print(f"[oi_display_poll] error: {e}", file=sys.stderr)
 
     def _backfill_history(self):
         """interval별 최근 확정봉을 REST로 받아 'candle_history'로 일괄 발행.
