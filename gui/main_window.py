@@ -13,6 +13,7 @@ from gui.controllers.bot_controller import BotController
 from gui.views.dashboard_page import DashboardPage
 from gui.views.trading_page import TradingPage
 from gui.views.log_page import LogPage
+from gui.views.settings_page import SettingsPage
 
 POLL_MS = 100
 
@@ -31,10 +32,12 @@ class MainWindow:
 
         self.dashboard = DashboardPage(notebook, self.bus, self.controller)
         self.trading = TradingPage(notebook, self.bus, self.controller)
+        self.settings = SettingsPage(notebook, self.bus, self.controller)
         self.log = LogPage(notebook, self.bus, self.controller)
 
         notebook.add(self.dashboard.frame, text="Dashboard")
         notebook.add(self.trading.frame, text="Trading")
+        notebook.add(self.settings.frame, text="Settings")
         notebook.add(self.log.frame, text="Log")
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
