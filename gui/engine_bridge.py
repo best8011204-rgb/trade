@@ -93,6 +93,7 @@ class EngineRunner:
             elif kind == 1:  # OIPoint
                 latest_oi = obj.oi
                 engine.on_oi(obj)
+                self.bus.publish("oi", {"ts": obj.ts, "oi": obj.oi})
             else:  # Candle
                 c, (_box_ts, box_low, box_high) = obj
                 engine.a.on_cvd_delta(c.ts, c.cvd_delta)

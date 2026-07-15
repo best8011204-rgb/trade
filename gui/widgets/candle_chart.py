@@ -31,6 +31,10 @@ BG_COLOR = "#161a1e"
 GRID_COLOR = "#2b3139"
 TEXT_COLOR = "#848e9c"
 BOX_COLOR = "#f0b90b"   # Binance yellow — 4h 박스 상/하단
+OI_COLOR = "#f0b90b"    # OI 라인 (Binance 지표 골드)
+OI_FILL = "#3a3420"     # OI 영역 채움 (골드 저채도)
+OI_PANEL_FRAC = 0.24    # 캔버스 높이 중 OI 서브패널 비중
+MAX_OI_KEPT = 2000      # 보관할 OI 포인트 수
 
 
 class CandleChart(ttk.Frame):
@@ -57,6 +61,7 @@ class CandleChart(ttk.Frame):
         self._forming = {iv: None for iv in INTERVALS}     # 집계 중 미확정 봉 (합성 모드)
         self._has_native = {iv: False for iv in INTERVALS} # 네이티브 봉 수신 여부
         self._box = (None, None)                            # (box_low, box_high)
+        self._oi = []                                       # [(ts, oi)] 시간순
 
         self._dirty = False
         self._after_id = self.after(REDRAW_MS, self._redraw_loop)
@@ -110,6 +115,22 @@ class CandleChart(ttk.Frame):
 
     def set_box(self, box_low, box_high):
         self._box = (box_low, box_high)
+        self._mark_dirty()
+
+    def add_oi(self, ts, oi):
+        """OI 포인트 1건 (라이브 5분 폴링 / 합성 oi_points)."""
+        if self._oi and ts <= self._oi[-1][0]:
+            if ts == self._oi[-1][0]:
+                self._oi[-1] = (ts, oi)   # 같은 시각 재수신 시 교체
+                self._mark_dirty()
+            return
+        self._oi.append((ts, oi))
+        del self._oi[:-MAX_OI_KEPT]
+        self._mark_dirty()
+
+    def set_oi_history(self, points):
+        """REST 백필 결과 [(ts, oi)]로 OI 버퍼를 통째로 초기화."""
+        self._oi = sorted(points, key=lambda p: p[0])[-MAX_OI_KEPT:]
         self._mark_dirty()
 
     # ------------------------------------------------------------------
@@ -189,7 +210,11 @@ class CandleChart(ttk.Frame):
         span = y_max - y_min
 
         plot_w = W - PAD_L - PAD_R
-        plot_h = H - PAD_T - PAD_B
+        avail_h = H - PAD_T - PAD_B
+        # OI 데이터가 있으면 하단에 서브패널 분리 (Binance 지표 패널 스타일)
+        oi_h = int(avail_h * OI_PANEL_FRAC) if self._oi else 0
+        oi_gap = 8 if oi_h else 0
+        plot_h = avail_h - oi_h - oi_gap
         n = len(bars)
         slot = plot_w / n
         body_w = max(1, min(slot * 0.7, 12))
@@ -230,5 +255,74 @@ class CandleChart(ttk.Frame):
                        fill=UP_COLOR if last["close"] >= last["open"] else DOWN_COLOR,
                        dash=(1, 3))
 
+        # ---- OI 서브패널 (Binance 오픈 인터레스트 지표 스타일) ----
+        oi_txt = ""
+        if oi_h:
+            oi_top = PAD_T + plot_h + oi_gap
+            oi_txt = self._draw_oi_panel(cv, bars, slot, PAD_L, PAD_R, W, oi_top, oi_h)
+
         src = "실데이터" if self._has_native[iv] else "1m 집계(합성)"
-        self._info.config(text=f"{iv} · {n}봉 · 종가 {last['close']:,.1f} · {src}")
+        self._info.config(text=f"{iv} · {n}봉 · 종가 {last['close']:,.1f}{oi_txt} · {src}")
+
+    def _draw_oi_panel(self, cv, bars, slot, PAD_L, PAD_R, W, top, h):
+        """캔들 X축과 시간 정렬된 OI 라인+영역 서브차트. 반환: 인포바용 텍스트."""
+        t0, t1 = bars[0]["ts"], bars[-1]["ts"]
+        # 화면 구간 밖 직전 포인트 1개를 포함해 라인이 왼쪽 끝까지 이어지게 한다
+        pts = [p for p in self._oi if p[0] <= t1]
+        first_in = next((i for i, p in enumerate(pts) if p[0] >= t0), None)
+        if first_in is None:
+            pts = pts[-1:]
+        elif first_in > 0:
+            pts = pts[first_in - 1:]
+        if not pts:
+            return ""
+
+        vals = [v for _, v in pts]
+        v_min, v_max = min(vals), max(vals)
+        span = max(v_max - v_min, max(abs(v_max), 1e-9) * 1e-4)
+        v_min -= span * 0.08
+        v_max += span * 0.08
+        span = v_max - v_min
+
+        cv.create_line(PAD_L, top, W - PAD_R, top, fill=GRID_COLOR)
+
+        span_t = max(t1 - t0, 1e-9)
+        x_right = PAD_L + slot * (len(bars) - 1) + slot / 2
+
+        def X(ts):
+            return min(PAD_L + (ts - t0) / span_t * (x_right - PAD_L), x_right)
+
+        def Y(v):
+            return top + (v_max - v) / span * h
+
+        xy = [(max(X(ts), PAD_L), Y(v)) for ts, v in pts]
+        if len(xy) >= 2:
+            base = top + h
+            poly = [(xy[0][0], base)] + xy + [(xy[-1][0], base)]
+            cv.create_polygon(*[c for p in poly for c in p], fill=OI_FILL, outline="")
+            cv.create_line(*[c for p in xy for c in p], fill=OI_COLOR, width=1)
+        last_x, last_y = xy[-1]
+        cv.create_oval(last_x - 2, last_y - 2, last_x + 2, last_y + 2,
+                       fill=OI_COLOR, outline=OI_COLOR)
+
+        cv.create_text(PAD_L + 4, top + 4, text="OI", fill=OI_COLOR,
+                       anchor="nw", font=("Arial", 8, "bold"))
+        for v, anchor_y in ((v_max, top), (v_min, top + h)):
+            cv.create_text(W - PAD_R + 6, max(min(anchor_y, top + h - 5), top + 5),
+                           text=_fmt_oi(v), fill=TEXT_COLOR, anchor="w", font=("Arial", 8))
+        last_oi = pts[-1][1]
+        cv.create_text(W - PAD_R + 6, last_y, text=_fmt_oi(last_oi),
+                       fill=OI_COLOR, anchor="w", font=("Arial", 8, "bold"))
+        return f" · OI {_fmt_oi(last_oi)}"
+
+
+def _fmt_oi(v):
+    """Binance식 축약 표기 (86.53K, 1.24M)."""
+    a = abs(v)
+    if a >= 1e9:
+        return f"{v / 1e9:.2f}B"
+    if a >= 1e6:
+        return f"{v / 1e6:.2f}M"
+    if a >= 1e3:
+        return f"{v / 1e3:.2f}K"
+    return f"{v:,.2f}"
