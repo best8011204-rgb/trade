@@ -33,6 +33,24 @@ class BotController:
         if b_params is not None:
             self.b_params = b_params
 
+    def stop_setup(self, setup: str):
+        """Settings 페이지 "중지" 버튼. 실행 중인 러너가 있을 때만 의미가
+        있다 — 해당 셋업의 신규 신호 감지를 멈추고, 진행 중이던 포지션은
+        기록하지 않고 버린다."""
+        if self.is_running:
+            self.runner.stop_setup(setup)
+
+    def restart_setup(self, setup: str, params):
+        """Settings 페이지 "적용" — 실행 중인 러너가 있으면 해당 셋업을 새
+        파라미터로 즉시 재시작한다(진행 중 포지션은 기록 없이 버림). 다음
+        전체 Start에도 같은 파라미터가 쓰이도록 보관값도 함께 갱신한다."""
+        if setup == "A":
+            self.a_params = params
+        else:
+            self.b_params = params
+        if self.is_running:
+            self.runner.restart_setup(setup, params)
+
     def start(self, symbol="BTCUSDT", speed=200.0, days=14, mode="synthetic"):
         if self.is_running:
             return

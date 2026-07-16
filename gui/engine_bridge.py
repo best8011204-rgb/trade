@@ -32,6 +32,7 @@ class EngineRunner:
         self.seed = seed
         self.a_params = a_params or CascadeAParams()
         self.b_params = b_params or CascadeBParams()
+        self.engine = None  # _run()이 생성한 뒤 채운다 — Settings의 중지/재시작이 참조
         self._thread = None
         self._stopping = threading.Event()
 
@@ -46,6 +47,18 @@ class EngineRunner:
 
     def stop(self):
         self._stopping.set()
+
+    def stop_setup(self, setup: str):
+        """Settings 페이지 "중지" 버튼. 합성 러너는 asyncio 루프가 없는
+        평범한 스레드라 직접 호출한다 (CPython GIL 하에서 속성 재할당은
+        원자적이라 안전)."""
+        if self.engine is not None:
+            self.engine.stop_setup(setup)
+
+    def restart_setup(self, setup: str, params):
+        """Settings 페이지 "적용" — 실행 중인 러너에 새 파라미터를 즉시 반영."""
+        if self.engine is not None:
+            self.engine.restart_setup(setup, params)
 
     # ------------------------------------------------------------------
     def _run(self):
@@ -63,6 +76,7 @@ class EngineRunner:
             return
 
         engine = StrategyEngine(self.a_params, self.b_params)
+        self.engine = engine
         events = self._build_timeline(sim)
 
         self.bus.publish("status", {

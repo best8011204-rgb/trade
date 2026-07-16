@@ -190,6 +190,22 @@ class LiveEngineRunner:
     def is_alive(self):
         return self._thread is not None and self._thread.is_alive()
 
+    def stop_setup(self, setup: str):
+        """Settings 페이지 "중지" 버튼. GUI(메인) 스레드에서 호출되므로,
+        엔진을 실제로 만지는 작업은 asyncio 루프 스레드에 스레드세이프하게
+        예약한다 (call_soon_threadsafe)."""
+        self._call_threadsafe(lambda: self.runner.engine.stop_setup(setup))
+
+    def restart_setup(self, setup: str, params):
+        """Settings 페이지 "적용" — 실행 중인 러너에 새 파라미터를 즉시 반영."""
+        self._call_threadsafe(lambda: self.runner.engine.restart_setup(setup, params))
+
+    def _call_threadsafe(self, fn):
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(fn)
+        else:
+            fn()  # 루프가 아직 안 떴으면(REST 백필 중 등) 직접 호출해도 안전
+
     def _cancel_all_tasks(self):
         for task in asyncio.all_tasks(self._loop):
             task.cancel()

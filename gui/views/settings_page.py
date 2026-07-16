@@ -4,10 +4,14 @@ CascadeAParams/CascadeBParams(둘 다 dataclass)의 필드를 dataclasses.fields
 읽어 자동으로 입력폼을 만든다. 새 필드가 추가되면 이 페이지도 자동으로
 반영되므로 setup_a.py/setup_b.py를 고칠 때 여기를 따로 손댈 필요가 없다.
 
-"적용"을 누르면 BotController.set_strategy_params()에 새 CascadeAParams/
-CascadeBParams 인스턴스를 넘긴다 — 다음 Start부터 적용되며, 이미 실행 중인
-러너에는 영향을 주지 않는다(엔진/러너는 시작 시점에 파라미터를 스냅샷으로
-받아가는 구조이기 때문).
+- "중지" (셋업별 버튼): 실행 중인 러너의 해당 셋업(A 또는 B) 트리거 감지를
+  즉시 멈춘다. 그 시점에 진행 중이던 포지션이 있으면 승패/bps 결과를
+  기록하지 않고 그냥 버린다 — "적용"을 누르기 전까지는 새 신호를 전혀
+  만들지 않는다.
+- "적용": 러너가 실행 중이면 BotController.restart_setup()으로 즉시
+  반영한다 — 진행 중이던 포지션은 "중지"와 동일하게 기록 없이 버려지고,
+  해당 셋업이 초기 상태부터 새 파라미터로 바로 재시작된다. 러너가 실행
+  중이 아니면 기존과 동일하게 다음 Start부터 쓰일 파라미터로만 저장된다.
 """
 
 import dataclasses
@@ -60,8 +64,10 @@ class SettingsPage:
 
         note = ttk.Label(
             self.frame,
-            text="Setup A/B 전략 파라미터. \"적용\"은 다음 Start부터 반영되며, "
-                 "이미 실행 중인 러너에는 영향을 주지 않습니다.",
+            text="Setup A/B 전략 파라미터. 실행 중일 때 \"적용\"을 누르면 즉시 "
+                 "새 파라미터로 재시작되고(진행 중 포지션은 기록되지 않고 버려짐), "
+                 "실행 중이 아니면 다음 Start부터 반영됩니다. \"중지\"는 해당 셋업만 "
+                 "즉시 멈춥니다.",
             foreground="gray", wraplength=900, justify="left")
         note.pack(anchor="w", padx=10, pady=(10, 5))
 
@@ -72,8 +78,13 @@ class SettingsPage:
 
         self.group_a = ParamGroup(groups, "Setup A — 캐스케이드 소진 롱", CascadeAParams)
         self.group_a.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        ttk.Button(groups, text="Setup A 중지", command=self._stop_a).grid(
+            row=1, column=0, sticky="w", padx=(0, 5), pady=(4, 0))
+
         self.group_b = ParamGroup(groups, "Setup B — 트랩드롱 플러시 숏", CascadeBParams)
         self.group_b.frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        ttk.Button(groups, text="Setup B 중지", command=self._stop_b).grid(
+            row=1, column=1, sticky="w", padx=(5, 0), pady=(4, 0))
 
         control = ttk.Frame(self.frame)
         control.pack(fill="x", padx=10, pady=10)
@@ -90,11 +101,31 @@ class SettingsPage:
         except ValueError as e:
             messagebox.showwarning("입력 오류", str(e))
             return
-        self.controller.set_strategy_params(a_params=a_params, b_params=b_params)
-        running_note = " (실행 중인 러너에는 다음 Start부터 적용됩니다)" if self.controller.is_running else ""
-        self.status.config(text=f"적용됨.{running_note}")
+        if self.controller.is_running:
+            self.controller.restart_setup("A", a_params)
+            self.controller.restart_setup("B", b_params)
+            self.status.config(text="적용됨 — 실행 중인 Setup A/B를 새 파라미터로 즉시 "
+                                     "재시작했습니다 (진행 중이던 포지션은 기록되지 않았습니다).")
+        else:
+            self.controller.set_strategy_params(a_params=a_params, b_params=b_params)
+            self.status.config(text="적용됨. (다음 Start부터 반영됩니다)")
 
     def _reset(self):
         self.group_a.reset()
         self.group_b.reset()
         self.status.config(text="기본값으로 되돌렸습니다 (아직 적용 전 — \"적용\"을 눌러야 반영됩니다).")
+
+    def _stop_a(self):
+        self._stop("A")
+
+    def _stop_b(self):
+        self._stop("B")
+
+    def _stop(self, setup):
+        if not self.controller.is_running:
+            messagebox.showinfo("정보", "실행 중인 러너가 없습니다.")
+            return
+        self.controller.stop_setup(setup)
+        self.status.config(text=f"Setup {setup}를 중지했습니다 (진행 중이던 포지션은 기록되지 "
+                                 f"않고 버려집니다). 다시 시작하려면 파라미터를 확인하고 "
+                                 f"\"적용\"을 누르세요.")

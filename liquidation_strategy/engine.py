@@ -42,6 +42,12 @@ class StrategyEngine:
 
         self._a_wait_for_b_flat = False
 
+        # GUI/텔레그램의 "중지" 기능용. False면 해당 셋업의 트리거 감지/신규
+        # 진입을 전부 건너뛴다 (기존 보유 포지션 관리는 계속된다 — stop_setup
+        # 호출 시 해당 셋업 포지션은 이미 버려지므로 실제로는 영향 없음).
+        self.a_enabled = True
+        self.b_enabled = True
+
     # ------------------------------------------------------------------
     # 외부에서 매 캔들마다 박스(4h 레인지) 값을 갱신해준다고 가정
     def set_box(self, box_low: float, box_high: float):
@@ -55,6 +61,8 @@ class StrategyEngine:
         return any(leg.trade.setup == setup for leg in self.open_legs)
 
     def on_force_order(self, fo: ForceOrder):
+        if not self.a_enabled:
+            return
         was_idle = self.a.state == "IDLE"
         self.a.on_force_order(fo)
         # A 트리거(T1)가 새로 발생 && B 포지션 보유 중이면 B의 TP2를 동적 전환
@@ -65,16 +73,46 @@ class StrategyEngine:
                     self.b.log.append((fo.ts, f"A트리거 발생 -> B TP2를 {fo.price:.1f}로 동적 전환"))
 
     def on_oi(self, pt: OIPoint):
-        self.b.on_oi(pt)
+        if self.b_enabled:
+            self.b.on_oi(pt)
 
     def on_candle(self, c: Candle, oi_now: float = None):
         self._manage_open_legs(c)
-        self.a.on_candle(c)
-        if self.box_high is not None:
+        if self.a_enabled:
+            self.a.on_candle(c)
+        if self.box_high is not None and self.b_enabled:
             self.b.on_candle(c, oi_now=oi_now)
 
-        self._try_enter_a(c)
-        self._try_enter_b(c)
+        if self.a_enabled:
+            self._try_enter_a(c)
+        if self.b_enabled:
+            self._try_enter_b(c)
+
+    # ------------------------------------------------------------------
+    # GUI/텔레그램의 실시간 중지·재시작 (Settings 페이지 "중지"/"적용" 버튼)
+    # ------------------------------------------------------------------
+    def stop_setup(self, setup: str):
+        """해당 셋업의 트리거 감지를 즉시 멈춘다. 진행 중이던 포지션이 있으면
+        결과를 기록하지 않고(승패/bps 집계에 남기지 않고) 그냥 버린다.
+        restart_setup()을 호출하기 전까지는 새 신호를 전혀 만들지 않는다."""
+        self.open_legs = [leg for leg in self.open_legs if leg.trade.setup != setup]
+        self._a_wait_for_b_flat = False  # A의 대기 신호가 setup 무관하게 걸려있을 수 있어 항상 정리
+        if setup == "A":
+            self.a_enabled = False
+        else:
+            self.b_enabled = False
+
+    def restart_setup(self, setup: str, params):
+        """해당 셋업을 새 파라미터로 초기 상태부터 즉시 다시 시작한다.
+        stop_setup()과 동일하게 진행 중이던 포지션은 기록 없이 버린다."""
+        self.open_legs = [leg for leg in self.open_legs if leg.trade.setup != setup]
+        self._a_wait_for_b_flat = False
+        if setup == "A":
+            self.a = CascadeExhaustionLong(params, self.a.macro_blackouts)
+            self.a_enabled = True
+        else:
+            self.b = TrappedLongFlushShort(params, self.b.box_lookback_s)
+            self.b_enabled = True
 
     # ------------------------------------------------------------------
     def _try_enter_a(self, c: Candle):
