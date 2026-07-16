@@ -19,8 +19,8 @@
 import tkinter as tk
 from tkinter import ttk
 
-INTERVALS = ("1m", "5m", "1h", "1d")
-INTERVAL_S = {"1m": 60, "5m": 300, "1h": 3600, "1d": 86400}
+INTERVALS = ("10s", "1m", "5m", "1h", "1d")
+INTERVAL_S = {"10s": 10, "1m": 60, "5m": 300, "1h": 3600, "1d": 86400}
 MAX_BARS_KEPT = 500     # 타임프레임별 보관 봉 수
 VISIBLE_BARS = 120      # 화면에 그릴 최근 봉 수
 REDRAW_MS = 250         # 리드로우 최소 간격
