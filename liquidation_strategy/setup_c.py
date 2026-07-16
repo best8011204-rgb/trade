@@ -202,6 +202,77 @@ def evaluate_bar(
     return {"pass": True, "signal": sig}
 
 
+def conditions(
+    df: pd.DataFrame, i: int, p: ParamsC,
+    funding_rate: float | None = None, in_blackout: bool = False,
+) -> list[dict]:
+    """G1~G4(+F1/F2)를 evaluate_bar처럼 첫 실패에서 멈추지 않고 항상 전부
+    계산해 체크리스트로 반환한다 (GUI 실시간 표시용, Setup A/B의
+    conditions()와 동일한 역할). 반환: [{"key","label","met","detail"}, ...]
+    (G1~G4 고정 4개 + 활성화된 필터만 추가)."""
+    out = []
+    have_history = i >= max(p.vr_window, p.box_lookback) + 1
+    if not have_history:
+        for key, label in (
+            ("g1_vr", f"G1: VR < {p.vr_threshold}"),
+            ("g2_hl", f"G2: 반감기 {p.hl_min}~{p.hl_max}봉"),
+            ("g3_z", f"G3: |z| ≥ {p.z_entry}"),
+            ("g4_box", "G4: 박스 내부"),
+        ):
+            out.append({"key": key, "label": label, "met": False, "detail": "히스토리 부족"})
+        return out
+
+    logp_vr = np.log(df["close"].iloc[i - p.vr_window : i + 1].to_numpy())
+
+    vr = variance_ratio(logp_vr, p.vr_q)
+    vr_ok = np.isfinite(vr) and vr < p.vr_threshold
+    out.append({
+        "key": "g1_vr", "label": f"G1: VR < {p.vr_threshold}",
+        "met": bool(vr_ok), "detail": f"{vr:.3f}" if np.isfinite(vr) else "계산불가",
+    })
+
+    hl = ar1_half_life(logp_vr)
+    hl_ok = p.hl_min <= hl <= p.hl_max
+    out.append({
+        "key": "g2_hl", "label": f"G2: 반감기 {p.hl_min}~{p.hl_max}봉",
+        "met": bool(hl_ok), "detail": f"{hl:.1f}봉" if math.isfinite(hl) else "회귀없음(inf)",
+    })
+
+    # zwin은 half-life에 의존 -> half-life가 무효(inf)면 최소값(zwin_lo)으로 대체 표시
+    hl_for_win = hl if math.isfinite(hl) else p.zwin_lo / 3.0
+    zwin = int(min(max(3 * hl_for_win, p.zwin_lo), p.zwin_hi))
+    if i - zwin + 1 < 0:
+        out.append({"key": "g3_z", "label": f"G3: |z| ≥ {p.z_entry}",
+                     "met": False, "detail": "히스토리 부족"})
+    else:
+        win = df["close"].iloc[i - zwin + 1 : i + 1]
+        sd = win.std(ddof=1)
+        z = float((df["close"].iloc[i] - win.mean()) / sd) if sd > 0 else 0.0
+        out.append({"key": "g3_z", "label": f"G3: |z| ≥ {p.z_entry}",
+                     "met": bool(abs(z) >= p.z_entry), "detail": f"z={z:+.2f}"})
+
+    box = df["close"].iloc[i - p.box_lookback + 1 : i + 1]
+    q_lo, q_hi = box.quantile(p.box_quantile_lo), box.quantile(p.box_quantile_hi)
+    px = float(df["close"].iloc[i])
+    out.append({
+        "key": "g4_box",
+        "label": f"G4: 박스 내부[{p.box_quantile_lo*100:.0f}~{p.box_quantile_hi*100:.0f}%]",
+        "met": bool(q_lo <= px <= q_hi), "detail": f"{px:.1f} ({q_lo:.1f}~{q_hi:.1f})",
+    })
+
+    if p.use_funding_filter:
+        if funding_rate is None:
+            out.append({"key": "f1_funding", "label": "F1: 펀딩 정렬", "met": False, "detail": "데이터 없음"})
+        else:
+            out.append({"key": "f1_funding", "label": "F1: 펀딩 정렬",
+                         "met": abs(funding_rate) <= p.funding_abs_limit,
+                         "detail": f"{funding_rate*100:.3f}%/8h"})
+    if p.use_event_blackout:
+        out.append({"key": "f2_blackout", "label": "F2: 이벤트 블랙아웃 아님",
+                     "met": not in_blackout, "detail": "차단 구간" if in_blackout else "정상"})
+    return out
+
+
 def should_exit(
     df: pd.DataFrame, i: int, sig: SignalC, bars_held: int, p: ParamsC
 ) -> str | None:

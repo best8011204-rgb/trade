@@ -1,4 +1,4 @@
-"""Settings 페이지 — Setup A / Setup B 전략 파라미터를 GUI에서 조정.
+"""Settings 페이지 — Setup A / Setup B / Setup C 전략 파라미터를 GUI에서 조정.
 
 CascadeAParams/CascadeBParams(둘 다 dataclass)의 필드를 dataclasses.fields()로
 읽어 자동으로 입력폼을 만든다. 새 필드가 추가되면 이 페이지도 자동으로
@@ -25,6 +25,7 @@ from tkinter import ttk, messagebox
 
 from liquidation_strategy.setup_a import CascadeAParams
 from liquidation_strategy.setup_b import CascadeBParams
+from liquidation_strategy.setup_c import ParamsC
 
 
 def _diff_params(old, new):
@@ -39,8 +40,25 @@ def _diff_params(old, new):
     return out
 
 
+_TYPE_NAME_MAP = {"bool": bool, "int": int, "float": float, "str": str}
+
+
+def _resolve_field_type(t):
+    """dataclasses.fields()의 f.type을 실제 호출 가능한 타입으로 정규화한다.
+
+    setup_c.py는 `from __future__ import annotations`(PEP 563)를 쓴다 —
+    이 경우 모든 어노테이션이 지연 평가되어 f.type이 실제 타입 객체가
+    아니라 그 이름의 '문자열'("bool", "float" 등)로 들어온다. 이걸 그대로
+    ftype(raw)처럼 호출하면 "'str' object is not callable"로 죽는다
+    (CascadeAParams/CascadeBParams는 이 future import가 없어 기존엔
+    드러나지 않았던 문제)."""
+    if isinstance(t, str):
+        return _TYPE_NAME_MAP.get(t, str)
+    return t
+
+
 class ParamGroup:
-    """dataclass 하나(CascadeAParams 또는 CascadeBParams)에 대한 입력폼."""
+    """dataclass 하나(CascadeAParams/CascadeBParams/ParamsC)에 대한 입력폼."""
 
     def __init__(self, parent, title, param_cls):
         self.param_cls = param_cls
@@ -54,15 +72,22 @@ class ParamGroup:
             entry = ttk.Entry(self.frame, width=14)
             entry.insert(0, str(getattr(defaults, f.name)))
             entry.grid(row=row, column=1, padx=8, pady=2, sticky="w")
-            self.entries[f.name] = (entry, f.type)
+            self.entries[f.name] = (entry, _resolve_field_type(f.type))
 
     def read(self):
-        """입력값을 파싱해 새 dataclass 인스턴스를 만든다. 실패 시 ValueError."""
+        """입력값을 파싱해 새 dataclass 인스턴스를 만든다. 실패 시 ValueError.
+
+        bool 필드(ParamsC의 use_vr_gate 등)는 특별 취급한다 — 파이썬의
+        bool("False")는 빈 문자열이 아니라서 True가 되는 흔한 함정이 있다.
+        """
         kwargs = {}
         for name, (entry, ftype) in self.entries.items():
             raw = entry.get().strip()
             try:
-                kwargs[name] = ftype(raw)
+                if ftype is bool:
+                    kwargs[name] = raw.lower() in ("true", "1", "yes", "on")
+                else:
+                    kwargs[name] = ftype(raw)
             except (TypeError, ValueError):
                 raise ValueError(f"{name}: '{raw}' 은(는) {ftype.__name__} 형식이 아닙니다.")
         return self.param_cls(**kwargs)
@@ -82,7 +107,7 @@ class SettingsPage:
 
         note = ttk.Label(
             self.frame,
-            text="Setup A/B 전략 파라미터. 실행 중일 때 \"적용\"을 누르면 즉시 "
+            text="Setup A/B/C 전략 파라미터. 실행 중일 때 \"적용\"을 누르면 즉시 "
                  "새 파라미터로 재시작되고(진행 중 포지션은 기록되지 않고 버려짐), "
                  "실행 중이 아니면 다음 Start부터 반영됩니다. \"중지\"는 해당 셋업만 "
                  "즉시 멈춥니다.",
@@ -93,6 +118,7 @@ class SettingsPage:
         groups.pack(fill="both", expand=True, padx=10)
         groups.columnconfigure(0, weight=1)
         groups.columnconfigure(1, weight=1)
+        groups.columnconfigure(2, weight=1)
 
         self.group_a = ParamGroup(groups, "Setup A — 캐스케이드 소진 롱", CascadeAParams)
         self.group_a.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
@@ -100,9 +126,14 @@ class SettingsPage:
             row=1, column=0, sticky="w", padx=(0, 5), pady=(4, 0))
 
         self.group_b = ParamGroup(groups, "Setup B — 트랩드롱 플러시 숏", CascadeBParams)
-        self.group_b.frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        self.group_b.frame.grid(row=0, column=1, sticky="nsew", padx=5)
         ttk.Button(groups, text="Setup B 중지", command=self._stop_b).grid(
-            row=1, column=1, sticky="w", padx=(5, 0), pady=(4, 0))
+            row=1, column=1, sticky="w", padx=5, pady=(4, 0))
+
+        self.group_c = ParamGroup(groups, "Setup C — OU 평균회귀 (검증 전, 가설)", ParamsC)
+        self.group_c.frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+        ttk.Button(groups, text="Setup C 중지", command=self._stop_c).grid(
+            row=1, column=2, sticky="w", padx=(5, 0), pady=(4, 0))
 
         control = ttk.Frame(self.frame)
         control.pack(fill="x", padx=10, pady=10)
@@ -116,27 +147,34 @@ class SettingsPage:
         try:
             a_params = self.group_a.read()
             b_params = self.group_b.read()
+            c_params = self.group_c.read()
         except ValueError as e:
             messagebox.showwarning("입력 오류", str(e))
             return
 
         if self.controller.is_running:
             engine = getattr(self.controller.runner, "engine", None)
+            c_runner = getattr(self.controller.runner, "c_runner", None)
             diffs_a = _diff_params(engine.a.p, a_params) if engine else []
             diffs_b = _diff_params(engine.b.p, b_params) if engine else []
+            diffs_c = _diff_params(c_runner.p, c_params) if c_runner else []
             self.controller.restart_setup("A", a_params)
             self.controller.restart_setup("B", b_params)
-            self.status.config(text="적용됨 — 실행 중인 Setup A/B를 새 파라미터로 즉시 "
+            self.controller.restart_setup("C", c_params)
+            self.status.config(text="적용됨 — 실행 중인 Setup A/B/C를 새 파라미터로 즉시 "
                                      "재시작했습니다 (진행 중이던 포지션은 기록되지 않았습니다).")
             self._log_diff("A", diffs_a, "즉시 재시작")
             self._log_diff("B", diffs_b, "즉시 재시작")
+            self._log_diff("C", diffs_c, "즉시 재시작")
         else:
             diffs_a = _diff_params(self.controller.a_params, a_params)
             diffs_b = _diff_params(self.controller.b_params, b_params)
-            self.controller.set_strategy_params(a_params=a_params, b_params=b_params)
+            diffs_c = _diff_params(self.controller.c_params, c_params)
+            self.controller.set_strategy_params(a_params=a_params, b_params=b_params, c_params=c_params)
             self.status.config(text="적용됨. (다음 Start부터 반영됩니다)")
             self._log_diff("A", diffs_a, "다음 Start부터")
             self._log_diff("B", diffs_b, "다음 Start부터")
+            self._log_diff("C", diffs_c, "다음 Start부터")
 
     def _log_diff(self, setup, diffs, when):
         if not diffs:
@@ -146,6 +184,7 @@ class SettingsPage:
     def _reset(self):
         self.group_a.reset()
         self.group_b.reset()
+        self.group_c.reset()
         self.status.config(text="기본값으로 되돌렸습니다 (아직 적용 전 — \"적용\"을 눌러야 반영됩니다).")
 
     def _stop_a(self):
@@ -153,6 +192,9 @@ class SettingsPage:
 
     def _stop_b(self):
         self._stop("B")
+
+    def _stop_c(self):
+        self._stop("C")
 
     def _stop(self, setup):
         if not self.controller.is_running:

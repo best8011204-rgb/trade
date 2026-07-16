@@ -161,22 +161,33 @@ AR(1) 반감기 추정이 매 봉마다 최근 24h(288봉) 구간 전체를 다�
 
 그래서 구조 자체를 다르게 가져갔다:
 
-- `setup_c.py` — `evaluate_bar(df, i, p)`(진입 게이트 G1~G4/F1~F2 판정)와
-  `should_exit(df, i, sig, bars_held, p)`(TP/SL/시간청산)만 있는 상태 없는
-  함수 집합. 포지션 자체를 들고 있지 않는다.
+- `setup_c.py` — `evaluate_bar(df, i, p)`(진입 게이트 G1~G4/F1~F2 판정),
+  `conditions(df, i, p)`(첫 실패에서 멈추지 않고 G1~G4를 항상 전부 계산 —
+  GUI 체크리스트용, setup_a/b.py의 conditions()와 동일 역할), `should_exit`
+  (TP/SL/시간청산)만 있는 상태 없는 함수 집합. 포지션 자체를 들고 있지 않는다.
 - `backtest_c.py` — 재진입 횟수·쿨다운처럼 "지금 포지션이 어떤 상태인가"를
   들고 있는 `Ledger`(방향별 독립: `ledger_c_long`/`ledger_c_short`)가 이걸
   감싼다. `compare_toggles()`가 명세 7장의 F1/F2 on/off 4조합 + VR 게이트
-  on/off 비교를 한 번에 돌려준다.
+  on/off 비교를 한 번에 돌려준다. 과거 데이터로 미리 검증할 때 쓴다.
+- `live_setup_c.py` — `LiveSetupCRunner`가 확정 5분봉을 하나씩 받아
+  `backtest_c.Ledger`를 그대로 재사용해 실시간으로 구동한다. 라이브
+  모드는 바이낸스가 이미 주는 5분봉을 그대로 받고, 합성 모드는
+  `MinuteAggregator`로 1분봉을 5분봉으로 직접 집계해 같은 인터페이스로
+  공급한다(표시용 집계와 같은 방식, 별도 구현).
 - `report_c.py` — A/B의 `report.py`와 판정 기준이 근본적으로 달라
   (BE-WR 대비 실측 승률, 반감기 대비 보유시간, VR게이트 기여도, A/B와의
   트레이드 상관) 공유하지 않고 별도 모듈로 뒀다.
 
-**`StrategyEngine`/GUI/`live_feed.py` 라이브 실행 경로에는 전혀 연결돼
-있지 않다.** 최소 표본(30건, 방향별) 검증 전까지는 백테스트 전용이며,
-명세서 6장 기각조건 4개(BE-WR 대비 기댓값, 반감기 대비 보유시간 과다,
-VR게이트 무기여, Setup A/B와 상관 과다) 중 하나라도 걸리면 그대로 폐기
-대상이다 — A/B를 라이브에 연결하기 전 거친 것과 동일한 절차.
+**`StrategyEngine` 자체에는 여전히 연결하지 않았지만(엔진 코드 무수정
+원칙 유지), GUI·라이브/합성 실행 경로에는 A/B와 동일한 수준으로 연동돼
+있다** — Dashboard의 트리거 조건 체크리스트, 포지션·PnL 테이블, Log
+탭, Settings의 파라미터 편집·중지·즉시재시작까지 전부 A/B와 나란히
+동작한다(단, 실주문은 A/B와 동일하게 비활성 — 페이퍼/섀도 전용). 이는
+A/B가 라이브에 연결되기 전 거쳤던 것과 같은 절차를 그대로 밟는 것이다 —
+라이브 섀도로 표본을 쌓되, 최소 표본(방향별 30건) 도달 전까지는
+`report_c.py`의 기각조건 판정이 "표본 미도달"로 보류된다. 명세서 6장
+기각조건 4개(BE-WR 대비 기댓값, 반감기 대비 보유시간 과다, VR게이트
+무기여, Setup A/B와 상관 과다) 중 하나라도 걸리면 폐기 대상이다.
 
 ---
 
@@ -193,4 +204,5 @@ VR게이트 무기여, Setup A/B와 상관 과다) 중 하나라도 걸리면 �
 | 실데이터 REST/실시간 어댑터 | `liquidation_strategy/binance_client.py`, `live_feed.py`, `backfill.py` |
 | Setup C 신호/청산 순수함수 | `liquidation_strategy/setup_c.py` |
 | Setup C 독립 원장 백테스트 | `liquidation_strategy/backtest_c.py` |
+| Setup C 실시간 러너(GUI 연동) | `liquidation_strategy/live_setup_c.py` |
 | Setup C 기각조건 판정 | `liquidation_strategy/report_c.py` |

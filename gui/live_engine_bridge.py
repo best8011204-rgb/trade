@@ -38,6 +38,8 @@ from liquidation_strategy.bot_config import load_config
 from liquidation_strategy.telegram_bot import TelegramBot, BotState, CommandHandler
 from liquidation_strategy.setup_a import CascadeAParams
 from liquidation_strategy.setup_b import CascadeBParams
+from liquidation_strategy.setup_c import ParamsC
+from liquidation_strategy.live_setup_c import LiveSetupCRunner
 
 HISTORY_LIMIT = 300           # 시작 시 interval별 REST 백필 봉 수 (차트 초기 표시용)
 SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
@@ -49,7 +51,7 @@ CONDITIONS_POLL_S = 1         # 트리거 하위조건 체크리스트 갱신 �
 class LiveEngineRunner:
     """LiveShadowRunner(asyncio)를 EventBus 세계로 감싸는 러너."""
 
-    def __init__(self, bus, symbol="BTCUSDT", a_params=None, b_params=None,
+    def __init__(self, bus, symbol="BTCUSDT", a_params=None, b_params=None, c_params=None,
                  out_json="liquidation_strategy_output_live.json", log_dir="logs"):
         self.bus = bus
         self.symbol = symbol.upper()
@@ -64,6 +66,9 @@ class LiveEngineRunner:
             trader=None,  # 실주문 비활성 — 페이퍼(가상 체결) 전용
             trade_usdt=float(self._cfg.get("trade_usdt", 100.0)),
         )
+        # Setup C: StrategyEngine과 독립 — 실제 5분봉(btcusdt@kline_5m) 확정봉을
+        # 그대로 받아 구동한다. 실주문 없음(A/B와 동일 원칙).
+        self.c_runner = LiveSetupCRunner(c_params or ParamsC())
 
         # 텔레그램: 토큰이 있으면 같은 엔진을 공유하는 봇을 함께 구동
         self._tg_bot = None
@@ -86,6 +91,8 @@ class LiveEngineRunner:
         self._n_closed_seen = 0
         self._a_log_seen = 0
         self._b_log_seen = 0
+        self._c_log_seen = 0
+        self._c_closed_seen = 0
         self._candle_count = 0
 
         self._install_hooks()
@@ -95,9 +102,16 @@ class LiveEngineRunner:
     # 엔진/섀도 로직 자체는 원본 그대로 실행된다.
     # ------------------------------------------------------------------
     def _install_hooks(self):
-        # 1) 모든 타임프레임 확정봉 -> "candle_tf"
+        # 1) 모든 타임프레임 확정봉 -> "candle_tf". 5분 확정봉은 Setup C도 구동한다
+        #    (StrategyEngine과 무관 — live_setup_c.LiveSetupCRunner가 독립적으로 처리).
         def on_display_candle(interval, candle):
             self.bus.publish("candle_tf", {"interval": interval, "candle": candle})
+            if interval == "5m" and candle.get("closed"):
+                self.c_runner.on_confirmed_5m_candle(candle)
+                self._flush_trades()
+                self._flush_signals()
+                self._publish_position()
+                self._publish_intent()
         self.runner.on_display_candle = on_display_candle
 
         # 2) 1m 확정봉 처리 후 -> 기존 토픽("candle"/"position"/"summary") 발행
@@ -118,15 +132,12 @@ class LiveEngineRunner:
                 "close": c.close, "volume": c.volume,
                 "box_low": eng.box_low, "box_high": eng.box_high,
             })
-            self.bus.publish("position", {"open_legs": _serialize_legs(eng.open_legs)})
-            a_text, a_level = eng.a.describe()
-            b_text, b_level = eng.b.describe()
-            self.bus.publish("intent", {
-                "a_text": a_text, "a_level": a_level,
-                "b_text": b_text, "b_level": b_level,
-            })
+            self._publish_position()
+            self._publish_intent()
             if self._candle_count % SUMMARY_EVERY_N_CANDLES == 0:
-                self.bus.publish("summary", eng.summary())
+                s = eng.summary()
+                s["C"] = self.c_runner.combined_summary()
+                self.bus.publish("summary", s)
             self._flush_trades()
             self._flush_signals()
         self.runner.on_kline_msg = on_kline_msg
@@ -148,6 +159,22 @@ class LiveEngineRunner:
             self.bus.publish("oi", {"ts": ts, "oi": oi_value})
         self.runner.on_oi_poll = on_oi_poll
 
+    def _publish_position(self):
+        eng = self.runner.engine
+        self.bus.publish("position", {
+            "open_legs": _serialize_legs(eng.open_legs) + self.c_runner.open_legs_view(),
+        })
+
+    def _publish_intent(self):
+        eng = self.runner.engine
+        a_text, a_level = eng.a.describe()
+        b_text, b_level = eng.b.describe()
+        self.bus.publish("intent", {
+            "a_text": a_text, "a_level": a_level,
+            "b_text": b_text, "b_level": b_level,
+            "c_text": self.c_runner.describe(), "c_level": None,
+        })
+
     def _flush_trades(self):
         trades = self.runner.engine.closed_trades
         while self._n_closed_seen < len(trades):
@@ -160,10 +187,17 @@ class LiveEngineRunner:
             })
             self._n_closed_seen += 1
 
+        c_trades = self.c_runner.closed_trades
+        while self._c_closed_seen < len(c_trades):
+            t = c_trades[self._c_closed_seen]
+            self.bus.publish("trade_closed", dict(t))
+            self._c_closed_seen += 1
+
     def _flush_signals(self):
         for log, seen_attr, setup in (
             (self.runner.engine.a.log, "_a_log_seen", "A"),
             (self.runner.engine.b.log, "_b_log_seen", "B"),
+            (self.c_runner.log, "_c_log_seen", "C"),
         ):
             seen = getattr(self, seen_attr)
             while seen < len(log):
@@ -201,11 +235,17 @@ class LiveEngineRunner:
         """Settings 페이지 "중지" 버튼. GUI(메인) 스레드에서 호출되므로,
         엔진을 실제로 만지는 작업은 asyncio 루프 스레드에 스레드세이프하게
         예약한다 (call_soon_threadsafe)."""
-        self._call_threadsafe(lambda: self.runner.engine.stop_setup(setup))
+        if setup == "C":
+            self._call_threadsafe(self.c_runner.stop)
+        else:
+            self._call_threadsafe(lambda: self.runner.engine.stop_setup(setup))
 
     def restart_setup(self, setup: str, params):
         """Settings 페이지 "적용" — 실행 중인 러너에 새 파라미터를 즉시 반영."""
-        self._call_threadsafe(lambda: self.runner.engine.restart_setup(setup, params))
+        if setup == "C":
+            self._call_threadsafe(lambda: self.c_runner.restart(params))
+        else:
+            self._call_threadsafe(lambda: self.runner.engine.restart_setup(setup, params))
 
     def _call_threadsafe(self, fn):
         if self._loop is not None:
@@ -326,6 +366,7 @@ class LiveEngineRunner:
                 self.bus.publish("conditions", {
                     "a_conditions": eng.a.conditions(now),
                     "b_conditions": eng.b.conditions(now),
+                    "c_conditions": self.c_runner.last_conditions,
                 })
             except Exception as e:
                 print(f"[conditions_poll] error: {e}", file=sys.stderr)

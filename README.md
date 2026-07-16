@@ -99,12 +99,19 @@ Setup B `oi_increase_pct` 1.5%→0.6%, `retest_window_s` 15분→30분.
 - **결과 → 대시보드 JSON 스키마 공용 변환** (`liquidation_strategy/report.py`)
 - **Setup C** — OU 평균회귀(박스권 전용, 비유동성 전략). 사전등록:
   `uploads/strategy_c_ou_reversion_spec.md`. Setup A/B(StrategyEngine, 실시간
-  스트리밍 상태머신)와 달리 5분봉 DataFrame을 입력받는 순수 함수 +
-  독립 원장 구조라 **StrategyEngine·GUI·라이브 실행 경로에는 연결돼 있지
-  않다** — 아직 최소 표본(30건) 검증 전인 가설 단계이기 때문
-  (`liquidation_strategy/setup_c.py`, `backtest_c.py`, `report_c.py`).
+  스트리밍 상태머신)와 달리 5분봉 DataFrame을 입력받는 순수 함수 + 독립
+  원장(`ledger_c_long`/`ledger_c_short`) 구조라 `StrategyEngine`에는 여전히
+  연결하지 않았지만, **GUI(Dashboard/Settings/PnL/Log)와 라이브·합성 실행
+  경로에는 A/B와 동일한 수준으로 연동돼 있다** — 실주문은 A/B와 똑같이
+  비활성(페이퍼)이며, 최소 표본(방향별 30건) 검증 전까지는 `report_c.py`의
+  기각조건 판정이 "표본 미도달"로 보류된다(A/B가 라이브 섀도로 표본을
+  쌓은 뒤 채택 여부를 정했던 것과 동일한 절차)
+  (`liquidation_strategy/setup_c.py`, `live_setup_c.py`, `backtest_c.py`,
+  `report_c.py`).
   ```bash
+  # 독립 백테스트(과거 데이터로 미리 검증)
   python3 -m liquidation_strategy.backtest_c --days 60 --compare-toggles
+  # 라이브/합성 실행은 run_all.py 하나로 A/B/C 전부 동시에 돈다
   ```
 
 ## 실행 (합성 데이터, 어디서나 동작)

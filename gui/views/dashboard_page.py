@@ -16,8 +16,8 @@ StrategyEngine/LiveEngineRunner/EventBus/live_feed 쪽 로직은 전혀 건드�
                     (진행 중인 봉 포함, 1m 수신 시마다 가격도 갱신)
 - "candle_history": 라이브 시작 시 REST 백필
 - "oi"/"oi_history": OI 포인트 / 히스토리
-- "intent":         Setup A/B 대기 요약 텍스트 + 참고가
-- "conditions":     T1~T4(A)/T1~T3(B) 하위 조건 체크리스트
+- "intent":         Setup A/B/C 대기 요약 텍스트 + 참고가
+- "conditions":     T1~T4(A)/T1~T3(B)/G1~G4(C) 하위 조건 체크리스트
 - "status"/"position"/"summary": 연결상태 / 보유 포지션 / 누적 성과
 """
 
@@ -47,8 +47,10 @@ class DashboardPage:
         self._last_price_color = theme.TEXT_PRIMARY
         self._intent_a_text = "-"
         self._intent_b_text = "-"
+        self._intent_c_text = "-"
         self._a_conditions = []
         self._b_conditions = []
+        self._c_conditions = []
 
         self._build_topbar()
         self._build_body()
@@ -132,6 +134,8 @@ class DashboardPage:
         self.trigger_a.pack(fill="x")
         self.trigger_b = TriggerSection(scroller.interior, "Setup B", theme.SHORT_RED, max_rows=4)
         self.trigger_b.pack(fill="x")
+        self.trigger_c = TriggerSection(scroller.interior, "Setup C", theme.ACCENT_YELLOW, max_rows=6)
+        self.trigger_c.pack(fill="x")
 
     def _build_center(self, body):
         center = ttk.Frame(body)
@@ -200,16 +204,20 @@ class DashboardPage:
     def _on_intent(self, data):
         self._intent_a_text = data.get("a_text", "-")
         self._intent_b_text = data.get("b_text", "-")
+        self._intent_c_text = data.get("c_text", "-")
         self.trigger_a.update(self._intent_a_text, self._a_conditions)
         self.trigger_b.update(self._intent_b_text, self._b_conditions)
+        self.trigger_c.update(self._intent_c_text, self._c_conditions)
         self.chart.set_watch("a", data.get("a_level"))
         self.chart.set_watch("b", data.get("b_level"))
 
     def _on_conditions(self, data):
         self._a_conditions = data.get("a_conditions", [])
         self._b_conditions = data.get("b_conditions", [])
+        self._c_conditions = data.get("c_conditions", [])
         self.trigger_a.update(self._intent_a_text, self._a_conditions)
         self.trigger_b.update(self._intent_b_text, self._b_conditions)
+        self.trigger_c.update(self._intent_c_text, self._c_conditions)
 
     def _on_candle_tf(self, data):
         self.chart.add_native(data["interval"], data["candle"])

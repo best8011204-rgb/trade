@@ -14,6 +14,7 @@ from gui.engine_bridge import EngineRunner
 from gui.live_engine_bridge import LiveEngineRunner
 from liquidation_strategy.setup_a import CascadeAParams
 from liquidation_strategy.setup_b import CascadeBParams
+from liquidation_strategy.setup_c import ParamsC
 
 
 class BotController:
@@ -22,16 +23,19 @@ class BotController:
         self.runner = None
         self.a_params = CascadeAParams()
         self.b_params = CascadeBParams()
+        self.c_params = ParamsC()
 
     @property
     def is_running(self):
         return self.runner is not None and self.runner.is_alive
 
-    def set_strategy_params(self, a_params=None, b_params=None):
+    def set_strategy_params(self, a_params=None, b_params=None, c_params=None):
         if a_params is not None:
             self.a_params = a_params
         if b_params is not None:
             self.b_params = b_params
+        if c_params is not None:
+            self.c_params = c_params
 
     def stop_setup(self, setup: str):
         """Settings 페이지 "중지" 버튼. 실행 중인 러너가 있을 때만 의미가
@@ -46,8 +50,10 @@ class BotController:
         전체 Start에도 같은 파라미터가 쓰이도록 보관값도 함께 갱신한다."""
         if setup == "A":
             self.a_params = params
-        else:
+        elif setup == "B":
             self.b_params = params
+        else:
+            self.c_params = params
         if self.is_running:
             self.runner.restart_setup(setup, params)
 
@@ -57,12 +63,12 @@ class BotController:
         if mode == "live":
             self.runner = LiveEngineRunner(
                 self.bus, symbol=symbol,
-                a_params=self.a_params, b_params=self.b_params,
+                a_params=self.a_params, b_params=self.b_params, c_params=self.c_params,
             )
         else:
             self.runner = EngineRunner(
                 self.bus, symbol=symbol, a_params=self.a_params,
-                b_params=self.b_params, speed=speed, days=days,
+                b_params=self.b_params, c_params=self.c_params, speed=speed, days=days,
             )
         self.runner.start()
 
