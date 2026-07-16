@@ -1,61 +1,30 @@
 #!/usr/bin/env python3
-"""24시간 자동매매 봇 엔트리포인트 — Binance 실시간 스트림 + 실주문 + 텔레그램.
+"""24시간 자동매매 봇 (헤드리스) — Binance 실시간 스트림 + 텔레그램.
 
-로컬 컴퓨터/노트북(인터넷 열린 환경)에서 실행:
+⚠️ 실주문 경로는 현재 비활성화되어 있다 — 항상 페이퍼(가상 체결) 모드로
+돌면서 신호/체결/현황을 텔레그램으로 알린다. config.json 의 live_trade 값은
+무시된다 (추후 실거래 재활성화 시 사용).
+
+GUI까지 같이 보려면 이 파일 대신 `python3 run_all.py` 를 실행하면 된다 —
+run_all 이 GUI + 전략 엔진 + 텔레그램 봇을 한 프로세스에서 모두 구동한다.
+run_bot.py 는 화면 없는 서버/장시간 무인 운영용 대안이다.
+
+주의: run_all 과 run_bot 을 동시에 실행하지 말 것 — 같은 텔레그램 토큰으로
+두 프로세스가 getUpdates 를 폴링하면 충돌(409)한다.
 
     pip install -r requirements.txt
-    cp config.example.json config.json   # 값 채우기
-    python3 run_bot.py                   # 또는 python3 run_bot.py --config config.json
-
-config.json 의 live_trade 가 false 면 주문 없이 신호·가상체결만 텔레그램으로
-알리는 페이퍼 모드로 돈다. 실계좌에 붙이기 전 testnet=true 로 먼저 검증할 것.
+    cp config.example.json config.json   # 텔레그램 토큰 채우기
+    python3 run_bot.py
 """
 
 import argparse
 import asyncio
-import json
-import os
 import sys
 
+from liquidation_strategy.bot_config import load_config
 from liquidation_strategy.live_feed import stream_loop, oi_poll_loop, snapshot_loop
 from liquidation_strategy.live_trade import LiveTradingRunner
-from liquidation_strategy.binance_trader import BinanceFuturesTrader
 from liquidation_strategy.telegram_bot import TelegramBot, BotState, CommandHandler
-
-DEFAULT_CONFIG = {
-    "symbol": "btcusdt",
-    "live_trade": False,          # true 면 실제 주문 실행
-    "testnet": True,              # 실계좌 전 테스트넷으로 검증
-    "binance_api_key": "",
-    "binance_api_secret": "",
-    "leverage": 3,
-    "trade_usdt": 100.0,          # 포지션 1개당 명목가 (USDT)
-    "telegram_bot_token": "",
-    "telegram_chat_id": None,     # 비우면 최초 /start 사용자를 자동 바인딩
-    "out_json": "liquidation_strategy_output_live.json",
-    "log_dir": "logs",
-    "state_file": "bot_state.json",
-}
-
-
-def load_config(path):
-    cfg = dict(DEFAULT_CONFIG)
-    if os.path.exists(path):
-        with open(path) as f:
-            cfg.update(json.load(f))
-    else:
-        print(f"[config] {path} 없음 — 기본값 + 환경변수만 사용", file=sys.stderr)
-    # 환경변수가 있으면 우선 (키를 파일에 남기고 싶지 않을 때)
-    env_map = {
-        "BINANCE_API_KEY": "binance_api_key",
-        "BINANCE_API_SECRET": "binance_api_secret",
-        "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
-        "TELEGRAM_CHAT_ID": "telegram_chat_id",
-    }
-    for env, key in env_map.items():
-        if os.environ.get(env):
-            cfg[key] = os.environ[env]
-    return cfg
 
 
 async def main_async(cfg):
@@ -63,19 +32,10 @@ async def main_async(cfg):
     if cfg.get("telegram_chat_id"):
         state.data["chat_id"] = int(cfg["telegram_chat_id"])
 
-    trader = None
-    if cfg["live_trade"]:
-        if not cfg["binance_api_key"] or not cfg["binance_api_secret"]:
-            print("[config] live_trade=true 인데 API 키가 없음 — 페이퍼 모드로 강등", file=sys.stderr)
-        else:
-            trader = BinanceFuturesTrader(
-                cfg["binance_api_key"], cfg["binance_api_secret"],
-                symbol=cfg["symbol"], testnet=cfg["testnet"], leverage=int(cfg["leverage"]),
-            )
-            trader.prepare()
-            bal = trader.get_usdt_balance()
-            print(f"[trader] 준비 완료 ({'테스트넷' if cfg['testnet'] else '메인넷'}) "
-                  f"가용잔고 {bal:,.2f} USDT", file=sys.stderr)
+    # 실주문 비활성화: live_trade 설정과 무관하게 트레이더를 만들지 않는다.
+    if cfg.get("live_trade"):
+        print("[config] live_trade=true 이지만 실주문 경로는 비활성화 상태 — "
+              "페이퍼 모드로 실행합니다.", file=sys.stderr)
 
     bot = None
     notify = None
@@ -87,7 +47,7 @@ async def main_async(cfg):
 
     runner = LiveTradingRunner(
         symbol=cfg["symbol"], out_json=cfg["out_json"], log_dir=cfg["log_dir"],
-        trader=trader, trade_usdt=float(cfg["trade_usdt"]), notify=notify,
+        trader=None, trade_usdt=float(cfg["trade_usdt"]), notify=notify,
     )
     state.apply_param_overrides(runner.engine)
     runner.paused = bool(state.data.get("paused"))
@@ -100,17 +60,14 @@ async def main_async(cfg):
     if bot:
         handler = CommandHandler(runner, state)
         tasks.append(bot.poll_loop(handler.handle))
-        mode = "실거래" if trader else "페이퍼"
-        net = " · 테스트넷" if (trader and cfg["testnet"]) else ""
-        bot.send(f"🤖 봇 시작 — {cfg['symbol'].upper()} · {mode}{net}\n"
-                 f"포지션당 {cfg['trade_usdt']} USDT · 레버리지 x{cfg['leverage']}\n"
+        bot.send(f"🤖 봇 시작 — {cfg['symbol'].upper()} · 페이퍼(실주문 비활성)\n"
                  "/help 로 명령 확인")
 
     await asyncio.gather(*tasks)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Binance 24h 자동매매 봇 (+텔레그램)")
+    ap = argparse.ArgumentParser(description="Binance 24h 페이퍼 트레이딩 봇 (+텔레그램, 실주문 비활성)")
     ap.add_argument("--config", default="config.json")
     args = ap.parse_args()
     cfg = load_config(args.config)

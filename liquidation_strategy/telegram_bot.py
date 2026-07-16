@@ -149,7 +149,7 @@ HELP = """사용 가능한 명령:
    예: /set a vol_multiplier 2.5
 /pause — 신규 진입 중지 (기존 포지션 청산은 계속)
 /resume — 신규 진입 재개
-/close all — 실포지션 전량 시장가 청산
+/close all — 보유 포지션 전량 청산
 /help — 이 도움말"""
 
 
