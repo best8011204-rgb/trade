@@ -97,6 +97,15 @@ Setup B `oi_increase_pct` 1.5%→0.6%, `retest_window_s` 15분→30분.
 - **실시간 섀도 러너** — forceOrder/aggTrade/kline 웹소켓 + OI 폴링 → 엔진 → JSONL 로그 (`liquidation_strategy/live_feed.py`)
 - **Setup B 실데이터 백필** — 과거 klines+OI로 Setup B만 실데이터 백테스트 (`liquidation_strategy/backfill.py`)
 - **결과 → 대시보드 JSON 스키마 공용 변환** (`liquidation_strategy/report.py`)
+- **Setup C** — OU 평균회귀(박스권 전용, 비유동성 전략). 사전등록:
+  `uploads/strategy_c_ou_reversion_spec.md`. Setup A/B(StrategyEngine, 실시간
+  스트리밍 상태머신)와 달리 5분봉 DataFrame을 입력받는 순수 함수 +
+  독립 원장 구조라 **StrategyEngine·GUI·라이브 실행 경로에는 연결돼 있지
+  않다** — 아직 최소 표본(30건) 검증 전인 가설 단계이기 때문
+  (`liquidation_strategy/setup_c.py`, `backtest_c.py`, `report_c.py`).
+  ```bash
+  python3 -m liquidation_strategy.backtest_c --days 60 --compare-toggles
+  ```
 
 ## 실행 (합성 데이터, 어디서나 동작)
 

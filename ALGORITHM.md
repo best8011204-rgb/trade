@@ -150,6 +150,34 @@ A는 최적 임계값으로도 30건 시점 평균 −22.8bps로 기각 조건�
 세 경로 모두 `report.py`가 동일한 JSON 스키마로 변환하므로, 대시보드
 (`dashboard_template.html`)는 데이터 출처를 몰라도 동작한다.
 
+## 8. Setup C — OU 평균회귀 (A/B와 다른 아키텍처)
+
+사전등록: `uploads/strategy_c_ou_reversion_spec.md`. Setup A/B는 실시간
+스트리밍 이벤트(ForceOrder/Candle/OI)를 하나씩 받아 내부 상태를 갱신하는
+상태 머신이지만, Setup C는 그 방식이 맞지 않는다 — VR(Variance Ratio)·
+AR(1) 반감기 추정이 매 봉마다 최근 24h(288봉) 구간 전체를 다시 계산해야
+하는 배치성 통계라, 스트리밍 상태 누적보다 "5분봉 DataFrame을 통째로
+받아 봉 인덱스 i를 훑는" 순수 함수 쪽이 훨씬 단순하고 정확하다.
+
+그래서 구조 자체를 다르게 가져갔다:
+
+- `setup_c.py` — `evaluate_bar(df, i, p)`(진입 게이트 G1~G4/F1~F2 판정)와
+  `should_exit(df, i, sig, bars_held, p)`(TP/SL/시간청산)만 있는 상태 없는
+  함수 집합. 포지션 자체를 들고 있지 않는다.
+- `backtest_c.py` — 재진입 횟수·쿨다운처럼 "지금 포지션이 어떤 상태인가"를
+  들고 있는 `Ledger`(방향별 독립: `ledger_c_long`/`ledger_c_short`)가 이걸
+  감싼다. `compare_toggles()`가 명세 7장의 F1/F2 on/off 4조합 + VR 게이트
+  on/off 비교를 한 번에 돌려준다.
+- `report_c.py` — A/B의 `report.py`와 판정 기준이 근본적으로 달라
+  (BE-WR 대비 실측 승률, 반감기 대비 보유시간, VR게이트 기여도, A/B와의
+  트레이드 상관) 공유하지 않고 별도 모듈로 뒀다.
+
+**`StrategyEngine`/GUI/`live_feed.py` 라이브 실행 경로에는 전혀 연결돼
+있지 않다.** 최소 표본(30건, 방향별) 검증 전까지는 백테스트 전용이며,
+명세서 6장 기각조건 4개(BE-WR 대비 기댓값, 반감기 대비 보유시간 과다,
+VR게이트 무기여, Setup A/B와 상관 과다) 중 하나라도 걸리면 그대로 폐기
+대상이다 — A/B를 라이브에 연결하기 전 거친 것과 동일한 절차.
+
 ---
 
 ## 관련 코드
@@ -163,3 +191,6 @@ A는 최적 임계값으로도 30건 시점 평균 −22.8bps로 기각 조건�
 | 기각조건 판정 + 리포트 스키마 | `liquidation_strategy/report.py` |
 | 합성 데이터 생성 | `liquidation_strategy/simulate_data.py` |
 | 실데이터 REST/실시간 어댑터 | `liquidation_strategy/binance_client.py`, `live_feed.py`, `backfill.py` |
+| Setup C 신호/청산 순수함수 | `liquidation_strategy/setup_c.py` |
+| Setup C 독립 원장 백테스트 | `liquidation_strategy/backtest_c.py` |
+| Setup C 기각조건 판정 | `liquidation_strategy/report_c.py` |
