@@ -44,6 +44,28 @@ python3 run_all.py                    # GUI + 실시간 엔진 + 텔레그램 �
 봇을 시작한 뒤 텔레그램에서 봇에게 `/start`를 보내면 그 채팅이 관리자
 채팅으로 바인딩된다 (다른 사람은 명령 불가).
 
+#### 🔒 시크릿(API 키/토큰)은 파일 대신 환경변수 사용을 권장
+
+`config.json`은 `.gitignore`에 등록돼 있어 git에는 절대 올라가지 않지만,
+디스크에는 평문으로 남는다. 더 안전하게 하려면 `config.json`의 해당 값을
+비워두고, 아래 환경변수로만 주입하면 된다 (환경변수가 있으면 파일 값보다
+항상 우선 적용된다):
+
+- `BINANCE_API_KEY`, `BINANCE_API_SECRET`
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+
+Windows에서 한 번만 영구 등록하려면(사용자 계정 범위, 재부팅/새 터미널부터
+적용):
+
+```powershell
+setx TELEGRAM_BOT_TOKEN "여기에_토큰"
+setx BINANCE_API_KEY "여기에_키"
+setx BINANCE_API_SECRET "여기에_시크릿"
+```
+
+`setx`는 이미 열려 있는 터미널/실행 중인 프로그램에는 즉시 반영되지 않는다
+— 새 터미널을 열거나 `run_all.py`를 다시 실행할 때부터 적용된다.
+
 ### 텔레그램 명령
 
 - `/status` — 모드/현재가/상태머신/보유 포지션/잔고 요약
