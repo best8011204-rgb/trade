@@ -11,8 +11,8 @@ from .data_types import Candle, OIPoint
 
 @dataclass
 class CascadeBParams:
-    oi_increase_pct: float = 0.015     # T1: 돌파 구간 OI 증가율
-    retest_window_s: float = 15 * 60   # T2: 상단 재탈환 시도 허용 시간
+    oi_increase_pct: float = 0.006     # T1: 돌파 구간 OI 증가율 (구 0.015 — 발동 빈도 완화)
+    retest_window_s: float = 30 * 60   # T2: 상단 재탈환 시도 허용 시간 (구 15분)
     oi_return_tolerance: float = 0.002 # T3: '돌파 전 수준으로 회귀' 판정 오차
     sl_buffer_pct: float = 0.001       # 손절 = sweep high + 0.1%
     tp1_fraction: float = 0.5          # 상단 복귀 확인 시 1차 진입 비율

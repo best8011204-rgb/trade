@@ -14,14 +14,14 @@ from .data_types import ForceOrder, Candle, Trade, Side
 @dataclass
 class CascadeAParams:
     lookback_hours: float = 24.0        # 기준 시간당 평균 산정 구간
-    vol_multiplier: float = 8.0          # T1: 60s 합계 >= 시간당 평균 * N
-    min_chain: int = 3                   # T1: 최소 연쇄 건수
+    vol_multiplier: float = 3.0          # T1: 60s 합계 >= 시간당 평균 * N (구 8.0 — 발동 빈도 완화)
+    min_chain: int = 2                   # T1: 최소 연쇄 건수 (구 3)
     cascade_window_s: float = 60.0       # T1: 감지 윈도우
-    min_move_pct: float = 0.008          # T2: 캐스케이드 시작 대비 하락률
-    exhaustion_gap_s: float = 90.0       # T3: 마지막 청산 후 무청산 경과
+    min_move_pct: float = 0.004          # T2: 캐스케이드 시작 대비 하락률 (구 0.008)
+    exhaustion_gap_s: float = 45.0       # T3: 마지막 청산 후 무청산 경과 (구 90)
     cvd_window_s: float = 60.0           # T3: 1분 CVD
-    rebound_pct: float = 0.0015          # T3: 저점 대비 반등폭
-    rebound_hold_s: float = 30.0         # T3: 반등 유지 시간
+    rebound_pct: float = 0.0008          # T3: 저점 대비 반등폭 (구 0.0015)
+    rebound_hold_s: float = 15.0         # T3: 반등 유지 시간 (구 30)
     sl_buffer_pct: float = 0.0015        # 손절 = 저점 - 버퍼
     tp1_retrace: float = 0.38            # 되돌림 38%
     tp2_retrace: float = 0.618           # 되돌림 61.8%

@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+
+# 실행 시크릿/상태 — 절대 커밋 금지
+config.json
+bot_state.json
+logs/
+liquidation_strategy_output_live.json

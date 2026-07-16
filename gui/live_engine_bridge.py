@@ -14,8 +14,11 @@ is_alive)와 동일한 EventBus 토픽("status"/"candle"/"candle_tf"/
   queue.Queue 적재만 하므로 어느 스레드에서 불러도 안전하다. 실제 위젯
   갱신은 메인 스레드의 EventBus.dispatch()(root.after 폴링)에서만 일어난다.
 
-실주문은 전혀 내지 않는다 — live_feed.LiveShadowRunner의 섀도(가상 체결)
-로직을 그대로 재사용한다. 이 모듈은 그 위에 EventBus 발행만 얹는다.
+실주문은 전혀 내지 않는다 — LiveTradingRunner를 trader=None(페이퍼)으로
+구동해 가상 체결만 한다. config.json 에 telegram_bot_token 이 있으면 같은
+엔진을 공유하는 텔레그램 봇(/status, /set, /pause 등)도 이 러너의 asyncio
+루프에서 함께 돈다 — run_all.py 하나로 GUI + 엔진 + 텔레그램이 모두 실행되는
+이유. 이 모듈은 그 위에 EventBus 발행만 얹는다.
 
 주의: 이 코드는 fstream.binance.com 웹소켓과 fapi.binance.com REST
 아웃바운드가 열린 환경(로컬 PC, VPS 등)에서만 동작한다.
@@ -28,8 +31,11 @@ import time
 
 from liquidation_strategy import binance_client as bc
 from liquidation_strategy.live_feed import (
-    LiveShadowRunner, stream_loop, oi_poll_loop, snapshot_loop, KLINE_INTERVALS,
+    stream_loop, oi_poll_loop, snapshot_loop, KLINE_INTERVALS,
 )
+from liquidation_strategy.live_trade import LiveTradingRunner
+from liquidation_strategy.bot_config import load_config
+from liquidation_strategy.telegram_bot import TelegramBot, BotState, CommandHandler
 from liquidation_strategy.setup_a import CascadeAParams
 from liquidation_strategy.setup_b import CascadeBParams
 
@@ -46,12 +52,31 @@ class LiveEngineRunner:
                  out_json="liquidation_strategy_output_live.json", log_dir="logs"):
         self.bus = bus
         self.symbol = symbol.upper()
-        self.runner = LiveShadowRunner(
+
+        # config.json 로드 (없으면 기본값) — 텔레그램 토큰/상태파일 공유
+        self._cfg = load_config(quiet=True)
+        self.runner = LiveTradingRunner(
             symbol=symbol.lower(),
             out_json=out_json, log_dir=log_dir,
             a_params=a_params or CascadeAParams(),
             b_params=b_params or CascadeBParams(),
+            trader=None,  # 실주문 비활성 — 페이퍼(가상 체결) 전용
+            trade_usdt=float(self._cfg.get("trade_usdt", 100.0)),
         )
+
+        # 텔레그램: 토큰이 있으면 같은 엔진을 공유하는 봇을 함께 구동
+        self._tg_bot = None
+        self._tg_handler = None
+        if self._cfg.get("telegram_bot_token"):
+            state = BotState(self._cfg.get("state_file", "bot_state.json"))
+            if self._cfg.get("telegram_chat_id"):
+                state.data["chat_id"] = int(self._cfg["telegram_chat_id"])
+            state.apply_param_overrides(self.runner.engine)   # /set 값 복원
+            self.runner.paused = bool(state.data.get("paused"))
+            self._tg_bot = TelegramBot(self._cfg["telegram_bot_token"], state)
+            self._tg_handler = CommandHandler(self.runner, state)
+            self.runner.notify = self._tg_bot.send
+
         self._loop = None
         self._thread = None
         self._stopping = threading.Event()
@@ -183,21 +208,27 @@ class LiveEngineRunner:
             self.bus.publish("status", {"running": False, "connected": False, "message": "정지됨"})
             return
 
-        # 2) 웹소켓 스트림: 자체 asyncio 루프
+        # 2) 웹소켓 스트림: 자체 asyncio 루프 (+ 텔레그램 봇, 토큰 있을 때)
+        tg_note = " · 텔레그램 ON" if self._tg_bot else ""
         self.bus.publish("status", {
             "running": True, "connected": True,
-            "message": f"실시간 연결 (웹소켓 + 1분 REST 폴백, 섀도 모드, 실주문 없음) — {self.symbol}",
+            "message": f"실시간 연결 (웹소켓 + 1분 REST 폴백, 섀도 모드, 실주문 없음{tg_note}) — {self.symbol}",
         })
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        tasks = [
+            stream_loop(self.runner, self.runner.symbol),
+            oi_poll_loop(self.runner, self.runner.symbol),
+            snapshot_loop(self.runner),
+            self._rest_kline_poll_loop(),
+            self._oi_display_poll_loop(),
+        ]
+        if self._tg_bot:
+            tasks.append(self._tg_bot.poll_loop(self._tg_handler.handle))
+            self._tg_bot.send(f"🤖 봇 시작 (GUI) — {self.symbol} · 페이퍼(실주문 비활성)\n"
+                              "/help 로 명령 확인")
         try:
-            self._loop.run_until_complete(asyncio.gather(
-                stream_loop(self.runner, self.runner.symbol),
-                oi_poll_loop(self.runner, self.runner.symbol),
-                snapshot_loop(self.runner),
-                self._rest_kline_poll_loop(),
-                self._oi_display_poll_loop(),
-            ))
+            self._loop.run_until_complete(asyncio.gather(*tasks))
         except asyncio.CancelledError:
             pass
         except Exception as e:
