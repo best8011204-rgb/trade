@@ -75,7 +75,7 @@ class LiveEngineRunner:
             state.apply_param_overrides(self.runner.engine)   # /set 값 복원
             self.runner.paused = bool(state.data.get("paused"))
             self._tg_bot = TelegramBot(self._cfg["telegram_bot_token"], state)
-            self._tg_handler = CommandHandler(self.runner, state)
+            self._tg_handler = CommandHandler(self.runner, state, bus=self.bus)
             self.runner.notify = self._tg_bot.send
 
         self._loop = None
@@ -189,6 +189,13 @@ class LiveEngineRunner:
     @property
     def is_alive(self):
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def engine(self):
+        """EngineRunner(합성)와 동일한 위치에서 엔진에 접근할 수 있게 하는
+        얇은 위임 — Settings 페이지가 모드와 무관하게 controller.runner.engine
+        으로 통일해서 읽을 수 있다."""
+        return self.runner.engine
 
     def stop_setup(self, setup: str):
         """Settings 페이지 "중지" 버튼. GUI(메인) 스레드에서 호출되므로,

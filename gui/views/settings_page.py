@@ -12,14 +12,31 @@ CascadeAParams/CascadeBParams(둘 다 dataclass)의 필드를 dataclasses.fields
   반영한다 — 진행 중이던 포지션은 "중지"와 동일하게 기록 없이 버려지고,
   해당 셋업이 초기 상태부터 새 파라미터로 바로 재시작된다. 러너가 실행
   중이 아니면 기존과 동일하게 다음 Start부터 쓰일 파라미터로만 저장된다.
+
+"중지"/"적용"으로 실제 반영된 변경은 EventBus "config" 토픽으로도 발행해
+Log 탭에 남긴다 (텔레그램 /set, /pause, /resume, /close all 도 같은
+토픽으로 남는다 — telegram_bot.py 참고).
 """
 
 import dataclasses
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from liquidation_strategy.setup_a import CascadeAParams
 from liquidation_strategy.setup_b import CascadeBParams
+
+
+def _diff_params(old, new):
+    """두 파라미터 dataclass 인스턴스에서 실제로 값이 달라진 필드만
+    "이름: 이전 → 이후" 문자열 목록으로 반환한다."""
+    out = []
+    for f in dataclasses.fields(new):
+        old_val = getattr(old, f.name, None)
+        new_val = getattr(new, f.name)
+        if old_val != new_val:
+            out.append(f"{f.name}: {old_val} → {new_val}")
+    return out
 
 
 class ParamGroup:
@@ -59,6 +76,7 @@ class ParamGroup:
 
 class SettingsPage:
     def __init__(self, parent, bus, controller):
+        self.bus = bus
         self.controller = controller
         self.frame = ttk.Frame(parent)
 
@@ -101,14 +119,29 @@ class SettingsPage:
         except ValueError as e:
             messagebox.showwarning("입력 오류", str(e))
             return
+
         if self.controller.is_running:
+            engine = getattr(self.controller.runner, "engine", None)
+            diffs_a = _diff_params(engine.a.p, a_params) if engine else []
+            diffs_b = _diff_params(engine.b.p, b_params) if engine else []
             self.controller.restart_setup("A", a_params)
             self.controller.restart_setup("B", b_params)
             self.status.config(text="적용됨 — 실행 중인 Setup A/B를 새 파라미터로 즉시 "
                                      "재시작했습니다 (진행 중이던 포지션은 기록되지 않았습니다).")
+            self._log_diff("A", diffs_a, "즉시 재시작")
+            self._log_diff("B", diffs_b, "즉시 재시작")
         else:
+            diffs_a = _diff_params(self.controller.a_params, a_params)
+            diffs_b = _diff_params(self.controller.b_params, b_params)
             self.controller.set_strategy_params(a_params=a_params, b_params=b_params)
             self.status.config(text="적용됨. (다음 Start부터 반영됩니다)")
+            self._log_diff("A", diffs_a, "다음 Start부터")
+            self._log_diff("B", diffs_b, "다음 Start부터")
+
+    def _log_diff(self, setup, diffs, when):
+        if not diffs:
+            return
+        self._log(f"[Settings] Setup {setup} 파라미터 적용({when}): " + "; ".join(diffs))
 
     def _reset(self):
         self.group_a.reset()
@@ -129,3 +162,7 @@ class SettingsPage:
         self.status.config(text=f"Setup {setup}를 중지했습니다 (진행 중이던 포지션은 기록되지 "
                                  f"않고 버려집니다). 다시 시작하려면 파라미터를 확인하고 "
                                  f"\"적용\"을 누르세요.")
+        self._log(f"[Settings] Setup {setup} 중지 (진행 중이던 포지션은 기록되지 않고 버려짐)")
+
+    def _log(self, msg):
+        self.bus.publish("config", {"ts": time.time(), "msg": msg})

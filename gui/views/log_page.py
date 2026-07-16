@@ -1,6 +1,10 @@
-"""Log 페이지 — 시그널/체결 이벤트 원시 로그 (읽기 전용).
+"""Log 페이지 — 시그널/체결/설정변경 이벤트 원시 로그 (읽기 전용).
 
-"signal"과 "trade_closed" 토픽을 구독해 최근 이벤트를 텍스트로 누적 표시한다.
+"signal"/"trade_closed"/"status"를 구독해 최근 이벤트를 텍스트로 누적
+표시한다. "config"는 Settings 페이지의 "적용"/"중지" 버튼이나 텔레그램
+/set·/pause·/resume·/close all 처럼, 설정/전략 파라미터가 실제로 바뀌어
+반영될 때마다 발행되는 토픽이다 — 어떤 경로로 바뀌었든 여기 한 곳에서
+전부 확인할 수 있다.
 """
 
 import time
@@ -35,6 +39,7 @@ class LogPage:
         bus.subscribe("signal", self._on_signal)
         bus.subscribe("trade_closed", self._on_trade_closed)
         bus.subscribe("status", self._on_status)
+        bus.subscribe("config", self._on_config)
 
     def _append(self, line):
         self.text.config(state="normal")
@@ -65,3 +70,8 @@ class LogPage:
 
     def _on_status(self, data):
         self._append(f"[status] {data.get('message', '')}")
+
+    def _on_config(self, data):
+        ts = data.get("ts")
+        t = time.strftime("%H:%M:%S", time.localtime(ts)) if ts else "--:--:--"
+        self._append(f"[{t}] {data.get('msg', '')}")

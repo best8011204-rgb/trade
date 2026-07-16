@@ -19,6 +19,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 import requests
 
@@ -154,11 +155,21 @@ HELP = """사용 가능한 명령:
 
 
 class CommandHandler:
-    """텔레그램 명령 -> 러너/엔진 조작. poll_loop 와 같은 이벤트 루프에서 실행됨."""
+    """텔레그램 명령 -> 러너/엔진 조작. poll_loop 와 같은 이벤트 루프에서 실행됨.
 
-    def __init__(self, runner, state: BotState):
+    bus(EventBus)를 넘기면 파라미터 변경/일시정지/청산 같은 "적용된 변경"을
+    GUI의 Log 탭("config" 토픽)에도 남긴다. GUI 없이 헤드리스로 도는
+    run_bot.py 는 bus 없이 생성하면 되고, 이 경우 그냥 조용히 건너뛴다.
+    """
+
+    def __init__(self, runner, state: BotState, bus=None):
         self.runner = runner
         self.state = state
+        self.bus = bus
+
+    def _log(self, msg: str):
+        if self.bus is not None:
+            self.bus.publish("config", {"ts": time.time(), "msg": f"[텔레그램] {msg}"})
 
     def handle(self, text: str) -> str:
         parts = text.split()
@@ -182,15 +193,18 @@ class CommandHandler:
                 self.runner.paused = True
                 self.state.data["paused"] = True
                 self.state.save()
+                self._log("신규 진입 일시정지 (/pause)")
                 return "⏸ 신규 진입을 중지했습니다. (/resume 으로 재개)"
             if cmd == "/resume":
                 self.runner.paused = False
                 self.state.data["paused"] = False
                 self.state.save()
+                self._log("신규 진입 재개 (/resume)")
                 return "▶️ 신규 진입을 재개했습니다."
             if cmd == "/close":
                 if args and args[0].lower() == "all":
                     self.runner.manual_close_all()
+                    self._log("포지션 전량 청산 요청 (/close all)")
                     return "✅ 전량 청산 주문을 보냈습니다. /status 로 확인하세요."
                 return "사용법: /close all"
             return "알 수 없는 명령입니다. /help 를 확인하세요."
@@ -253,4 +267,5 @@ class CommandHandler:
         setattr(p, name, val)
         self.state.data["params"].setdefault(setup, {})[name] = val
         self.state.save()
+        self._log(f"/set {setup} {name}: {old} → {val}")
         return f"✅ Setup {setup.upper()} {name}: {old} → {val} (즉시 적용, 재시작에도 유지)"
