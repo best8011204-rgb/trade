@@ -34,14 +34,14 @@ class BotState:
         self.data = {"chat_id": None, "paused": False, "params": {"a": {}, "b": {}}}
         if os.path.exists(path):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     self.data.update(json.load(f))
             except Exception as e:
                 print(f"[state] 로드 실패({e}) — 기본값 사용", file=sys.stderr)
 
     def save(self):
         tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 

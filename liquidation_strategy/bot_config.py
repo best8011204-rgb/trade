@@ -33,7 +33,7 @@ ENV_MAP = {
 def load_config(path="config.json", quiet=False):
     cfg = dict(DEFAULT_CONFIG)
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg.update(json.load(f))
     elif not quiet:
         print(f"[config] {path} 없음 — 기본값 + 환경변수만 사용", file=sys.stderr)

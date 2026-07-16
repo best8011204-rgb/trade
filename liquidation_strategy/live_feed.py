@@ -98,7 +98,7 @@ class LiveShadowRunner:
         self.signal_log_path = os.path.join(log_dir, "signals.jsonl")
 
     def _append_jsonl(self, path, obj):
-        with open(path, "a") as f:
+        with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     # ---- inbound events ----------------------------------------------
@@ -195,7 +195,7 @@ class LiveShadowRunner:
         }
         out = build_report(self.engine, list(self.candles), meta)
         tmp = self.out_json + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False)
         os.replace(tmp, self.out_json)
 
