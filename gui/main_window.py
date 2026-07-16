@@ -8,6 +8,7 @@ root.after(POLL_MS, self._poll)로 100ms마다 EventBus.dispatch()를 호출해
 import tkinter as tk
 from tkinter import ttk
 
+from gui import theme
 from gui.event_bus import EventBus
 from gui.controllers.bot_controller import BotController
 from gui.views.dashboard_page import DashboardPage
@@ -22,7 +23,8 @@ class MainWindow:
     def __init__(self, root, autostart_live=False):
         self.root = root
         self.root.title("청산 흐름 전략 — 실시간 대시보드 (섀도 전용, 실주문 없음)")
-        self.root.geometry("980x760")
+        self.root.geometry("1280x800")
+        theme.apply_theme(self.root)
 
         self.bus = EventBus()
         self.controller = BotController(self.bus)

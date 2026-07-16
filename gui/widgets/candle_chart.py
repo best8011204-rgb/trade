@@ -19,6 +19,8 @@
 import tkinter as tk
 from tkinter import ttk
 
+from gui import theme
+
 INTERVALS = ("1m", "5m", "1h", "1d")
 INTERVAL_S = {"1m": 60, "5m": 300, "1h": 3600, "1d": 86400}
 MAX_BARS_KEPT = 500     # 타임프레임별 보관 봉 수
@@ -50,14 +52,15 @@ class CandleChart(ttk.Frame):
     def __init__(self, parent, height=320):
         super().__init__(parent)
 
-        # ---- 타임프레임 선택 바 ----
+        # ---- 타임프레임 선택 바 (바이낸스 스타일 좌측 정렬 탭) ----
         bar = ttk.Frame(self)
         bar.pack(fill="x")
         self._tf_var = tk.StringVar(value="1m")
         for iv in INTERVALS:
             ttk.Radiobutton(bar, text=iv, value=iv, variable=self._tf_var,
-                            command=self._mark_dirty).pack(side="left", padx=2)
-        self._info = ttk.Label(bar, text="", foreground="gray")
+                            style="ChartTab.TRadiobutton",
+                            command=self._mark_dirty).pack(side="left", padx=(0, 2))
+        self._info = ttk.Label(bar, text="", style="MutedPage.TLabel")
         self._info.pack(side="right", padx=6)
 
         # ---- 캔버스 ----

@@ -2,17 +2,20 @@
 
 from tkinter import ttk
 
-RUNNING_COLOR = "#0ecb81"
-STOPPED_COLOR = "#f6465d"
-CONNECTING_COLOR = "#f0b90b"
+from gui import theme
+
+RUNNING_COLOR = theme.LONG_GREEN
+STOPPED_COLOR = theme.SHORT_RED
+CONNECTING_COLOR = theme.ACCENT_YELLOW
 
 
 class StatusWidget(ttk.Frame):
     def __init__(self, parent):
-        super().__init__(parent)
-        self.dot = ttk.Label(self, text="●", foreground=STOPPED_COLOR, font=("Arial", 12))
+        super().__init__(parent, style="Panel.TFrame")
+        self.dot = ttk.Label(self, text="●", foreground=STOPPED_COLOR,
+                              style="Panel.TLabel", font=("Arial", 12))
         self.dot.pack(side="left")
-        self.text = ttk.Label(self, text="정지됨")
+        self.text = ttk.Label(self, text="정지됨", style="Panel.TLabel")
         self.text.pack(side="left", padx=(4, 0))
 
     def update_status(self, data):

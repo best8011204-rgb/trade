@@ -7,6 +7,8 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+from gui import theme
+
 MAX_LINES = 1000
 
 
@@ -23,7 +25,10 @@ class LogPage:
         scrollbar = ttk.Scrollbar(text_frame)
         scrollbar.pack(side="right", fill="y")
         self.text = tk.Text(text_frame, height=20, state="disabled", wrap="word",
-                            yscrollcommand=scrollbar.set)
+                            yscrollcommand=scrollbar.set,
+                            bg=theme.PANEL_BG, fg=theme.TEXT_PRIMARY,
+                            insertbackground=theme.TEXT_PRIMARY,
+                            relief="flat", borderwidth=0)
         self.text.pack(fill="both", expand=True)
         scrollbar.config(command=self.text.yview)
 
