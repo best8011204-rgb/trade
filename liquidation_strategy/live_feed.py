@@ -89,10 +89,6 @@ class LiveShadowRunner:
         self._a_log_seen = 0
         self._b_log_seen = 0
 
-        # 10초봉(표시 전용, 엔진 미사용): 바이낸스는 10초 kline을 지원하지
-        # 않으므로 aggTrade 체결 스트림을 직접 10초 버킷으로 모아 합성한다.
-        self._bucket10 = None
-
         # GUI 표시 전용 훅. 시그니처: fn(interval: str, candle: dict)
         # candle dict: {ts, open, high, low, close, volume, closed: True}
         self.on_display_candle = None
@@ -121,41 +117,9 @@ class LiveShadowRunner:
     def on_agg_trade_msg(self, data):
         if data["s"] != self.symbol.upper():
             return
-        price = float(data["p"])
         qty = float(data["q"])
         delta = -qty if data["m"] else qty  # m=True: 매수자가 메이커 -> 공격적 매도
         self.cvd_accum += delta
-        self._update_10s_bucket(data["T"] / 1000.0, price, qty)
-
-    def _update_10s_bucket(self, ts, price, qty):
-        """체결 1건을 10초 버킷에 누적하고 표시 훅으로 즉시 흘려보낸다.
-
-        전략 엔진(Setup A/B)은 이 버킷을 전혀 소비하지 않는다 — 순수 표시용
-        타임프레임이다. 매 체결마다 진행 중인 버킷을 다시 방출하므로 체결이
-        잦을 때는 초 단위보다도 촘촘하게(거의 실시간으로) 갱신된다.
-        """
-        bucket_ts = (int(ts) // 10) * 10
-        b = self._bucket10
-        if b is None or b["ts"] != bucket_ts:
-            if b is not None:
-                b["closed"] = True
-                self._emit_10s(b)
-            b = {"ts": bucket_ts, "open": price, "high": price, "low": price,
-                 "close": price, "volume": qty, "closed": False}
-            self._bucket10 = b
-        else:
-            b["high"] = max(b["high"], price)
-            b["low"] = min(b["low"], price)
-            b["close"] = price
-            b["volume"] += qty
-        self._emit_10s(b)
-
-    def _emit_10s(self, b):
-        if self.on_display_candle is not None:
-            try:
-                self.on_display_candle("10s", dict(b))
-            except Exception as e:
-                print(f"[display_hook] error: {e}", file=sys.stderr)
 
     def on_kline_msg(self, data):
         """모든 kline 스트림(1m/5m/1h/1d)의 공용 진입점.

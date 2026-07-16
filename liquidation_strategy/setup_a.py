@@ -193,6 +193,81 @@ class CascadeExhaustionLong:
             return "진입 신호 발생 — 체결 대기 중", self.cascade_low
         return self.state, None
 
+    def _window_stats(self, now_ts: float):
+        """now_ts 기준으로 60초 청산 윈도우를 다시 계산한다 (상태를 바꾸지
+        않는 읽기 전용 조회 — 표시용으로 정확한 실시간 값을 주기 위함,
+        _sell_liqs 자체는 on_force_order가 들어올 때만 정리되므로 그 사이엔
+        오래된 값이 남아있을 수 있다)."""
+        cutoff = now_ts - self.p.cascade_window_s
+        items = [n for ts, n in self._sell_liqs if ts >= cutoff]
+        return sum(items), len(items)
+
+    def conditions(self, now_ts: float):
+        """T1~T4 하위 조건 각각의 실시간 충족 여부 (GUI 체크리스트 표시용).
+
+        상태 단계와 무관하게 항상 전부 계산한다 — 예를 들어 IDLE이어도 T1의
+        진행 상황을, WATCH_EXHAUST에서도 T1/T2는 이미 충족된 값 그대로 보여준다.
+        반환: [{"key", "label", "met": bool, "detail": str}, ...] (7개 고정).
+        """
+        p = self.p
+        out = []
+
+        window_sum, window_count = self._window_stats(now_ts)
+        threshold = self._hourly_baseline * p.vol_multiplier if self._hourly_baseline else None
+        out.append({
+            "key": "t1_vol",
+            "label": f"T1: 60초 청산합계 ≥ 기준×{p.vol_multiplier:.1f}",
+            "met": threshold is not None and window_sum >= threshold,
+            "detail": f"{window_sum:,.0f} / {threshold:,.0f}" if threshold else f"{window_sum:,.0f} / 기준선 대기중",
+        })
+        out.append({
+            "key": "t1_chain",
+            "label": f"T1: 최소 연쇄 {p.min_chain}건",
+            "met": window_count >= p.min_chain,
+            "detail": f"{window_count}건",
+        })
+
+        if self.cascade_start_price and self.cascade_low is not None:
+            move_pct = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price
+        else:
+            move_pct = 0.0
+        out.append({
+            "key": "t2_move",
+            "label": f"T2: 하락률 ≥ {p.min_move_pct*100:.2f}%",
+            "met": move_pct >= p.min_move_pct,
+            "detail": f"{move_pct*100:.2f}%",
+        })
+
+        gap = (now_ts - self.last_liq_ts) if self.last_liq_ts is not None else None
+        out.append({
+            "key": "t3_gap",
+            "label": f"T3: 무청산 경과 ≥ {p.exhaustion_gap_s:.0f}초",
+            "met": gap is not None and gap >= p.exhaustion_gap_s,
+            "detail": f"{gap:.0f}초 경과" if gap is not None else "청산 이력 없음",
+        })
+        cvd = self._cvd_1m()
+        out.append({
+            "key": "t3_cvd",
+            "label": "T3: 1분 CVD ≥ 0",
+            "met": cvd >= 0,
+            "detail": f"{cvd:+.2f}",
+        })
+        hold = (now_ts - self.rebound_since_ts) if self.rebound_since_ts is not None else 0.0
+        out.append({
+            "key": "t3_rebound",
+            "label": f"T3: 반등 {p.rebound_pct*100:.2f}% 유지 ≥ {p.rebound_hold_s:.0f}초",
+            "met": self.rebound_since_ts is not None and hold >= p.rebound_hold_s,
+            "detail": f"{hold:.0f}초 유지 중" if self.rebound_since_ts is not None else "반등 미확인",
+        })
+        blackout = self._in_macro_blackout(now_ts)
+        out.append({
+            "key": "t4_macro",
+            "label": "T4: 매크로 블랙아웃 아님",
+            "met": not blackout,
+            "detail": "차단 구간" if blackout else "정상",
+        })
+        return out
+
     def allow_reentry(self) -> bool:
         return self.reentry_count < self.p.max_reentries
 

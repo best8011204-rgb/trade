@@ -113,6 +113,10 @@ class EngineRunner:
                     "a_text": a_text, "a_level": a_level,
                     "b_text": b_text, "b_level": b_level,
                 })
+                self.bus.publish("conditions", {
+                    "a_conditions": engine.a.conditions(c.ts),
+                    "b_conditions": engine.b.conditions(c.ts),
+                })
                 if candle_count % SUMMARY_EVERY_N_CANDLES == 0:
                     self.bus.publish("summary", engine.summary())
 

@@ -2,9 +2,9 @@
 
 engine_bridge.EngineRunner(합성 데이터)와 동일한 인터페이스(start/stop/
 is_alive)와 동일한 EventBus 토픽("status"/"candle"/"candle_tf"/
-"candle_history"/"position"/"signal"/"trade_closed"/"summary")을 발행한다.
-따라서 BotController가 어느 러너를 쓰든 GUI(views/widgets)는 수정할 필요가
-없다.
+"candle_history"/"position"/"signal"/"trade_closed"/"summary"/"intent"/
+"conditions")을 발행한다. 따라서 BotController가 어느 러너를 쓰든
+GUI(views/widgets)는 수정할 필요가 없다.
 
 스레드 모델:
 - Tkinter 메인 스레드는 그대로 GUI 전용.
@@ -43,6 +43,7 @@ HISTORY_LIMIT = 300           # 시작 시 interval별 REST 백필 봉 수 (차�
 SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
 REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
 OI_DISPLAY_POLL_S = 60        # GUI 표시용 OI 폴링 주기 (엔진용 5분 폴링과 별개)
+CONDITIONS_POLL_S = 1         # 트리거 하위조건 체크리스트 갱신 주기 (실시간 표시용)
 
 
 class LiveEngineRunner:
@@ -228,6 +229,7 @@ class LiveEngineRunner:
             snapshot_loop(self.runner),
             self._rest_kline_poll_loop(),
             self._oi_display_poll_loop(),
+            self._conditions_poll_loop(),
         ]
         if self._tg_bot:
             tasks.append(self._tg_bot.poll_loop(self._tg_handler.handle))
@@ -286,6 +288,24 @@ class LiveEngineRunner:
                         "s": self.symbol, "i": iv, "x": True, "t": k[0],
                         "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
                     }})
+
+    async def _conditions_poll_loop(self):
+        """T1~T4(A)/T1~T3(B) 하위 조건 체크리스트를 실시간(1초 주기)으로
+        갱신한다. describe()의 상태 텍스트와 달리 conditions()는 시간 경과
+        자체가 조건(무청산 경과, 반등 유지 등)이라 캔들 틱(1분)만으로는 GUI가
+        갱신 시점 사이에 뒤처져 보인다 — 실제 벽시계 시간(time.time())으로
+        매초 재계산해 정확한 실시간 상태를 보여준다."""
+        eng = self.runner.engine
+        while True:
+            await asyncio.sleep(CONDITIONS_POLL_S)
+            try:
+                now = time.time()
+                self.bus.publish("conditions", {
+                    "a_conditions": eng.a.conditions(now),
+                    "b_conditions": eng.b.conditions(now),
+                })
+            except Exception as e:
+                print(f"[conditions_poll] error: {e}", file=sys.stderr)
 
     async def _oi_display_poll_loop(self):
         """GUI 표시용 OI 1분 폴링. 엔진에는 넣지 않는다 —

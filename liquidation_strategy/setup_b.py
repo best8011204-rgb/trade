@@ -43,10 +43,13 @@ class TrappedLongFlushShort:
         self.pending_tranche2 = None
         self.log = []
 
+        self.last_oi = None  # 가장 최근 관측 OI (조건 체크리스트 표시용)
+
     def update_box(self, box_high: float):
         self.box_high = box_high
 
     def on_oi(self, pt: OIPoint):
+        self.last_oi = pt.oi
         if self.state in ("BREAKOUT", "TRAP_CONFIRMED"):
             if self.oi_peak is None or pt.oi > self.oi_peak:
                 self.oi_peak = pt.oi
@@ -165,6 +168,55 @@ class TrappedLongFlushShort:
                 self.sweep_high,
             )
         return self.state, None
+
+    def conditions(self, now_ts: float):
+        """T1~T3 하위 조건 각각의 실시간 충족 여부 (GUI 체크리스트 표시용).
+
+        상태 단계와 무관하게 항상 전부 계산한다. 반환: [{"key","label","met","detail"}, ...] (4개 고정).
+        """
+        p = self.p
+        out = []
+
+        breakout_happened = self.sweep_high is not None
+        out.append({
+            "key": "t1_breakout",
+            "label": "T1: 박스 상단 돌파",
+            "met": breakout_happened,
+            "detail": (f"고점 {self.sweep_high:,.1f}" if breakout_happened
+                       else (f"상단 {self.box_high:,.1f} 대기" if self.box_high is not None else "박스 미형성")),
+        })
+
+        if self.oi_at_breakout and self.oi_peak is not None:
+            oi_incr = (self.oi_peak - self.oi_at_breakout) / self.oi_at_breakout
+        else:
+            oi_incr = 0.0
+        out.append({
+            "key": "t1_oi",
+            "label": f"T1: OI 증가 ≥ {p.oi_increase_pct*100:.1f}%",
+            "met": self.oi_at_breakout is not None and oi_incr >= p.oi_increase_pct,
+            "detail": f"{oi_incr*100:.2f}%" if self.oi_at_breakout is not None else "돌파 전",
+        })
+
+        out.append({
+            "key": "t2_trap",
+            "label": "T2: 박스 상단 재하회(트랩 확정)",
+            "met": self.state == "TRAP_CONFIRMED",
+            "detail": "확정됨" if self.state == "TRAP_CONFIRMED" else "미확정",
+        })
+
+        if self.oi_at_breakout is not None and self.last_oi is not None:
+            fuel_met = self.last_oi > self.oi_at_breakout * (1 + p.oi_return_tolerance)
+            detail = f"OI {self.last_oi:,.0f} (기준 {self.oi_at_breakout:,.0f})"
+        else:
+            fuel_met = False
+            detail = "관찰 전"
+        out.append({
+            "key": "t3_fuel",
+            "label": "T3: 연료 유지(OI 미회귀)",
+            "met": fuel_met,
+            "detail": detail,
+        })
+        return out
 
     def consume_tranche2(self):
         sig = self.pending_tranche2
