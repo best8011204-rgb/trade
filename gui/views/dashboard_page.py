@@ -8,6 +8,8 @@
 - "candle_history": 라이브 시작 시 REST 백필 (타임프레임별 일괄 초기화)
 - "oi":             OI 포인트 (라이브 5분 폴링 / 합성 oi_points) -> 라벨+서브차트
 - "oi_history":     라이브 시작 시 OI 히스토리 REST 백필
+- "intent":         Setup A/B가 현재 무엇을 노리고 있는지 텍스트 설명 + 참고가
+                    (a_text/a_level/b_text/b_level) -> 상태 라벨 + 차트 점선
 - "status"/"position"/"summary": 기존과 동일
 """
 
@@ -34,6 +36,16 @@ class DashboardPage:
         self.oi_label = ttk.Label(top, text="OI: -", foreground="#b8860b")
         self.oi_label.pack(side="left", padx=20)
 
+        # ---- Setup A/B가 지금 노리고 있는 상황 (텍스트) ----
+        intent = ttk.Frame(self.frame)
+        intent.pack(fill="x", padx=10, pady=(0, 5))
+        self.intent_a = ttk.Label(intent, text="Setup A: -", foreground="#26a69a",
+                                   wraplength=1000, justify="left")
+        self.intent_a.pack(anchor="w")
+        self.intent_b = ttk.Label(intent, text="Setup B: -", foreground="#ec407a",
+                                   wraplength=1000, justify="left")
+        self.intent_b.pack(anchor="w")
+
         # ---- 실시간 캔들차트 ----
         self.chart = CandleChart(self.frame, height=300)
         self.chart.pack(fill="both", expand=True, padx=10, pady=(0, 5))
@@ -54,7 +66,8 @@ class DashboardPage:
         bus.subscribe("candle_history", self._on_candle_history)
         bus.subscribe("oi", self._on_oi)
         bus.subscribe("oi_history", self._on_oi_history)
-        bus.subscribe("position", self.positions.update_positions)
+        bus.subscribe("position", self._on_position)
+        bus.subscribe("intent", self._on_intent)
         bus.subscribe("summary", self.pnl.update_summary)
 
     def _on_candle(self, data):
@@ -72,6 +85,16 @@ class DashboardPage:
                 "close": data["close"], "volume": data.get("volume", 0.0),
                 "closed": True,
             })
+
+    def _on_position(self, data):
+        self.positions.update_positions(data)
+        self.chart.set_legs(data.get("open_legs", []))
+
+    def _on_intent(self, data):
+        self.intent_a.config(text=f"Setup A: {data.get('a_text', '-')}")
+        self.intent_b.config(text=f"Setup B: {data.get('b_text', '-')}")
+        self.chart.set_watch("a", data.get("a_level"))
+        self.chart.set_watch("b", data.get("b_level"))
 
     def _on_candle_tf(self, data):
         self.chart.add_native(data["interval"], data["candle"])

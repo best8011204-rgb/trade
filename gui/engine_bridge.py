@@ -107,6 +107,12 @@ class EngineRunner:
                     "box_low": box_low, "box_high": box_high,
                 })
                 self.bus.publish("position", {"open_legs": _serialize_legs(engine.open_legs)})
+                a_text, a_level = engine.a.describe()
+                b_text, b_level = engine.b.describe()
+                self.bus.publish("intent", {
+                    "a_text": a_text, "a_level": a_level,
+                    "b_text": b_text, "b_level": b_level,
+                })
                 if candle_count % SUMMARY_EVERY_N_CANDLES == 0:
                     self.bus.publish("summary", engine.summary())
 

@@ -139,6 +139,33 @@ class TrappedLongFlushShort:
         self.pending_signal = None
         return sig
 
+    def describe(self):
+        """현재 상태를 사람이 읽을 텍스트로 설명 (GUI/텔레그램 표시용).
+
+        반환: (설명 텍스트, 참고 가격 또는 None).
+        """
+        p = self.p
+        if self.state == "IDLE":
+            bh = f"{self.box_high:,.1f}" if self.box_high is not None else "-"
+            return (
+                f"박스 상단({bh}) 돌파 감시 중 — 돌파 시 OI +{p.oi_increase_pct*100:.1f}% 이상 "
+                f"유입 확인되면 트랩(신규 롱 유입)으로 판단",
+                None,
+            )
+        if self.state == "BREAKOUT":
+            return (
+                f"상단 돌파 감지(고점 {self.sweep_high:,.1f}) — OI 유입 확인 중. 박스 상단 아래로 "
+                f"복귀하면 트랩 확정(1차 진입), 재탈환 성공 시 숏커버로 분류해 취소",
+                self.sweep_high,
+            )
+        if self.state == "TRAP_CONFIRMED":
+            return (
+                f"트랩 확정(고점 {self.sweep_high:,.1f}) — {p.retest_window_s/60:.0f}분 내 상단 재탈환 "
+                f"실패 시 2차 진입, 재탈환 성공 시 취소, OI가 돌파 전 수준으로 회귀하면 연료소진으로 취소",
+                self.sweep_high,
+            )
+        return self.state, None
+
     def consume_tranche2(self):
         sig = self.pending_tranche2
         self.pending_tranche2 = None

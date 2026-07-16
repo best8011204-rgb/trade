@@ -118,6 +118,12 @@ class LiveEngineRunner:
                 "box_low": eng.box_low, "box_high": eng.box_high,
             })
             self.bus.publish("position", {"open_legs": _serialize_legs(eng.open_legs)})
+            a_text, a_level = eng.a.describe()
+            b_text, b_level = eng.b.describe()
+            self.bus.publish("intent", {
+                "a_text": a_text, "a_level": a_level,
+                "b_text": b_text, "b_level": b_level,
+            })
             if self._candle_count % SUMMARY_EVERY_N_CANDLES == 0:
                 self.bus.publish("summary", eng.summary())
             self._flush_trades()

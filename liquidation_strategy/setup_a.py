@@ -161,6 +161,38 @@ class CascadeExhaustionLong:
         self.pending_signal = None
         return sig
 
+    def describe(self):
+        """현재 상태를 사람이 읽을 텍스트로 설명 (GUI/텔레그램 표시용).
+
+        반환: (설명 텍스트, 참고 가격 또는 None). 참고 가격은 차트에
+        점선으로 그릴 때 쓰는 '지금 전략이 주시 중인 레벨'이다.
+        """
+        p = self.p
+        if self.state == "IDLE":
+            return (
+                f"청산 캐스케이드 대기 중 — 60초 내 SELL청산 합계가 "
+                f"시간당평균×{p.vol_multiplier:.1f} 이상 & {p.min_chain}건 이상 발생하면 추적 시작",
+                None,
+            )
+        if self.state == "CASCADE":
+            move_pct = 0.0
+            if self.cascade_start_price:
+                move_pct = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price * 100
+            return (
+                f"캐스케이드 진행 중(#{self.cascade_id}) — 저점 {self.cascade_low:,.1f} "
+                f"(시작가 대비 -{move_pct:.2f}%). -{p.min_move_pct*100:.2f}% 하락 확인되면 소진 관찰 시작",
+                self.cascade_low,
+            )
+        if self.state == "WATCH_EXHAUST":
+            return (
+                f"하락 소진 확인 중 — 저점 {self.cascade_low:,.1f} 대비 +{p.rebound_pct*100:.2f}% 반등이 "
+                f"{p.rebound_hold_s:.0f}초 유지 + 무청산 {p.exhaustion_gap_s:.0f}초 경과 + CVD 양전환 시 매수 진입",
+                self.cascade_low,
+            )
+        if self.state == "ARMED":
+            return "진입 신호 발생 — 체결 대기 중", self.cascade_low
+        return self.state, None
+
     def allow_reentry(self) -> bool:
         return self.reentry_count < self.p.max_reentries
 

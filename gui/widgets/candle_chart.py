@@ -30,11 +30,19 @@ DOWN_COLOR = "#f6465d"  # Binance red
 BG_COLOR = "#161a1e"
 GRID_COLOR = "#2b3139"
 TEXT_COLOR = "#848e9c"
-BOX_COLOR = "#f0b90b"   # Binance yellow — 4h 박스 상/하단
+BOX_COLOR = "#f0b90b"   # Binance yellow(주황) — Setup B 4h 박스 상/하단
 OI_COLOR = "#f0b90b"    # OI 라인 (Binance 지표 골드)
 OI_FILL = "#3a3420"     # OI 영역 채움 (골드 저채도)
 OI_PANEL_FRAC = 0.24    # 캔버스 높이 중 OI 서브패널 비중
 MAX_OI_KEPT = 2000      # 보관할 OI 포인트 수
+
+# 보유 포지션 SL/TP 점선 (setup 무관 공통)
+SL_COLOR = "#f6465d"    # 빨강 — 손절가
+TP1_COLOR = "#29b6f6"   # 파랑 — 1차 목표가
+TP2_COLOR = "#ab47bc"   # 보라 — 2차 목표가
+# 전략이 아직 포지션 없이 '주시 중'인 참고가 (설명은 Setup.describe() 참고)
+A_WATCH_COLOR = "#26a69a"  # 청록 — Setup A 캐스케이드 저점
+B_WATCH_COLOR = "#ec407a"  # 핑크 — Setup B 돌파 고점(sweep high)
 
 
 class CandleChart(ttk.Frame):
@@ -62,6 +70,8 @@ class CandleChart(ttk.Frame):
         self._has_native = {iv: False for iv in INTERVALS} # 네이티브 봉 수신 여부
         self._box = (None, None)                            # (box_low, box_high)
         self._oi = []                                       # [(ts, oi)] 시간순
+        self._legs = []                                      # 보유 포지션 [{sl, tp1, tp2, ...}]
+        self._watch = {"a": None, "b": None}                # Setup A/B가 주시 중인 참고가
 
         self._dirty = False
         self._after_id = self.after(REDRAW_MS, self._redraw_loop)
@@ -116,6 +126,17 @@ class CandleChart(ttk.Frame):
     def set_box(self, box_low, box_high):
         self._box = (box_low, box_high)
         self._mark_dirty()
+
+    def set_legs(self, open_legs):
+        """보유 중인 포지션(트랜치) 목록. 각 dict에 sl/tp1/tp2 가격 포함."""
+        self._legs = list(open_legs)
+        self._mark_dirty()
+
+    def set_watch(self, key, price):
+        """전략이 포지션 진입 전 주시 중인 참고가. key: 'a' | 'b'."""
+        if self._watch.get(key) != price:
+            self._watch[key] = price
+            self._mark_dirty()
 
     def add_oi(self, ts, oi):
         """OI 포인트 1건 (라이브 5분 폴링 / 합성 oi_points)."""
@@ -204,6 +225,13 @@ class CandleChart(ttk.Frame):
             y_min = min(y_min, bl)
         if bh is not None:
             y_max = max(y_max, bh)
+        # SL/TP/관찰 레벨도 화면 밖으로 벗어나지 않게 범위에 포함
+        extra_levels = [v for v in self._watch.values() if v is not None]
+        for leg in self._legs:
+            extra_levels += [v for v in (leg.get("sl"), leg.get("tp1"), leg.get("tp2")) if v is not None]
+        if extra_levels:
+            y_min = min(y_min, min(extra_levels))
+            y_max = max(y_max, max(extra_levels))
         span = max(y_max - y_min, 1e-9)
         y_min -= span * 0.05
         y_max += span * 0.05
@@ -230,10 +258,38 @@ class CandleChart(ttk.Frame):
             cv.create_text(W - PAD_R + 6, y, text=f"{p:,.1f}", fill=TEXT_COLOR,
                            anchor="w", font=("Arial", 8))
 
-        # 4h 박스 상/하단
-        for p in (bl, bh):
+        # 4h 박스 상/하단 (주황 점선, Setup B가 돌파를 감시하는 레인지)
+        for p, lbl in ((bh, "박스상단(B)"), (bl, "박스하단(B)")):
             if p is not None and y_min <= p <= y_max:
                 cv.create_line(PAD_L, Y(p), W - PAD_R, Y(p), fill=BOX_COLOR, dash=(4, 3))
+                cv.create_text(W - PAD_R + 6, Y(p), text=lbl, fill=BOX_COLOR,
+                               anchor="w", font=("Arial", 8))
+
+        # Setup A/B가 포지션 진입 전 주시 중인 참고가 (청록/핑크 점선)
+        for key, color, lbl in (("a", A_WATCH_COLOR, "A 저점(관찰)"), ("b", B_WATCH_COLOR, "B 돌파고점(관찰)")):
+            p = self._watch.get(key)
+            if p is not None and y_min <= p <= y_max:
+                cv.create_line(PAD_L, Y(p), W - PAD_R, Y(p), fill=color, dash=(5, 3))
+                cv.create_text(W - PAD_R + 6, Y(p), text=lbl, fill=color,
+                               anchor="w", font=("Arial", 8))
+
+        # 보유 포지션 SL/TP1/TP2 (빨강/파랑/보라 점선)
+        drawn = set()
+        for leg in self._legs:
+            for price, color, lbl in (
+                (leg.get("sl"), SL_COLOR, "SL"),
+                (leg.get("tp1"), TP1_COLOR, "TP1"),
+                (leg.get("tp2"), TP2_COLOR, "TP2"),
+            ):
+                if price is None:
+                    continue
+                dedup_key = (round(price, 1), color)
+                if dedup_key in drawn or not (y_min <= price <= y_max):
+                    continue
+                drawn.add(dedup_key)
+                cv.create_line(PAD_L, Y(price), W - PAD_R, Y(price), fill=color, dash=(6, 2))
+                cv.create_text(W - PAD_R + 6, Y(price), text=lbl, fill=color,
+                               anchor="w", font=("Arial", 8, "bold"))
 
         # 캔들
         for i, b in enumerate(bars):
@@ -249,11 +305,14 @@ class CandleChart(ttk.Frame):
                 cv.create_rectangle(x - body_w / 2, min(y0, y1), x + body_w / 2, max(y0, y1),
                                     outline=TEXT_COLOR, dash=(2, 2))
 
+        # 현재가 라인 — 전략 레벨이 아니라 마지막 종가 표시선. 마지막 봉이
+        # 양봉이면 녹색, 음봉이면 빨강으로 그려질 뿐 별도 의미는 없다.
         last = bars[-1]
         y_last = Y(last["close"])
-        cv.create_line(PAD_L, y_last, W - PAD_R, y_last,
-                       fill=UP_COLOR if last["close"] >= last["open"] else DOWN_COLOR,
-                       dash=(1, 3))
+        last_color = UP_COLOR if last["close"] >= last["open"] else DOWN_COLOR
+        cv.create_line(PAD_L, y_last, W - PAD_R, y_last, fill=last_color, dash=(1, 3))
+        cv.create_text(W - PAD_R + 6, y_last, text="현재가", fill=last_color,
+                       anchor="w", font=("Arial", 8))
 
         # ---- OI 서브패널 (Binance 오픈 인터레스트 지표 스타일) ----
         oi_txt = ""
