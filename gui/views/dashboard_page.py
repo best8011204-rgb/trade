@@ -3,8 +3,10 @@
 이 페이지는 EventBus를 구독만 하고 컨트롤러/엔진을 직접 호출하지 않는다.
 
 구독 토픽:
-- "candle":         1m 확정봉 (텍스트 라벨 + 합성 모드 차트 집계 입력)
-- "candle_tf":      라이브 모드의 타임프레임별(1m/5m/1h/1d) 네이티브 확정봉
+- "candle":         1m 확정봉 (박스 라벨 + 합성 모드 차트 집계 입력, 전략 엔진과 동일 주기)
+- "candle_tf":      라이브 모드의 타임프레임별(1m/5m/1h/1d) 네이티브 봉 —
+                    진행 중인 봉도 포함되어 바이낸스 갱신 주기(초 단위)로
+                    들어온다. 1m 수신 시마다 가격 라벨도 함께 갱신한다.
 - "candle_history": 라이브 시작 시 REST 백필 (타임프레임별 일괄 초기화)
 - "oi":             OI 포인트 (라이브 5분 폴링 / 합성 oi_points) -> 라벨+서브차트
 - "oi_history":     라이브 시작 시 OI 히스토리 REST 백필
@@ -98,6 +100,9 @@ class DashboardPage:
 
     def _on_candle_tf(self, data):
         self.chart.add_native(data["interval"], data["candle"])
+        if data["interval"] == "1m":
+            c = data["candle"]
+            self.price_label.config(text=f"가격: {c['close']:.1f}")
 
     def _on_candle_history(self, data):
         self.chart.set_history(data["interval"], data["candles"])

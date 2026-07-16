@@ -35,6 +35,7 @@ OI_COLOR = "#f0b90b"    # OI 라인 (Binance 지표 골드)
 OI_FILL = "#3a3420"     # OI 영역 채움 (골드 저채도)
 OI_PANEL_FRAC = 0.24    # 캔버스 높이 중 OI 서브패널 비중
 MAX_OI_KEPT = 2000      # 보관할 OI 포인트 수
+VOLUME_PANEL_FRAC = 0.16  # 캔버스 높이 중 거래량 서브패널 비중
 
 # 보유 포지션 SL/TP 점선 (setup 무관 공통)
 SL_COLOR = "#f6465d"    # 빨강 — 손절가
@@ -239,10 +240,12 @@ class CandleChart(ttk.Frame):
 
         plot_w = W - PAD_L - PAD_R
         avail_h = H - PAD_T - PAD_B
-        # OI 데이터가 있으면 하단에 서브패널 분리 (Binance 지표 패널 스타일)
+        # 하단에 거래량 서브패널(항상) + OI 서브패널(데이터 있을 때만) 분리
+        vol_h = int(avail_h * VOLUME_PANEL_FRAC)
+        vol_gap = 8
         oi_h = int(avail_h * OI_PANEL_FRAC) if self._oi else 0
         oi_gap = 8 if oi_h else 0
-        plot_h = avail_h - oi_h - oi_gap
+        plot_h = avail_h - vol_h - vol_gap - oi_h - oi_gap
         n = len(bars)
         slot = plot_w / n
         body_w = max(1, min(slot * 0.7, 12))
@@ -314,14 +317,40 @@ class CandleChart(ttk.Frame):
         cv.create_text(W - PAD_R + 6, y_last, text="현재가", fill=last_color,
                        anchor="w", font=("Arial", 8))
 
+        # ---- 거래량 서브패널 (캔들 바로 아래, Binance 스타일) ----
+        vol_top = PAD_T + plot_h + vol_gap
+        vol_txt = self._draw_volume_panel(cv, bars, slot, PAD_L, PAD_R, W, vol_top, vol_h)
+
         # ---- OI 서브패널 (Binance 오픈 인터레스트 지표 스타일) ----
         oi_txt = ""
         if oi_h:
-            oi_top = PAD_T + plot_h + oi_gap
+            oi_top = vol_top + vol_h + oi_gap
             oi_txt = self._draw_oi_panel(cv, bars, slot, PAD_L, PAD_R, W, oi_top, oi_h)
 
         src = "실데이터" if self._has_native[iv] else "1m 집계(합성)"
-        self._info.config(text=f"{iv} · {n}봉 · 종가 {last['close']:,.1f}{oi_txt} · {src}")
+        self._info.config(text=f"{iv} · {n}봉 · 종가 {last['close']:,.1f}{vol_txt}{oi_txt} · {src}")
+
+    def _draw_volume_panel(self, cv, bars, slot, PAD_L, PAD_R, W, top, h):
+        """캔들과 동일 X축의 거래량 막대 서브차트. 반환: 인포바용 텍스트."""
+        vols = [b.get("volume", 0.0) for b in bars]
+        v_max = max(vols) if vols else 0.0
+        cv.create_line(PAD_L, top, W - PAD_R, top, fill=GRID_COLOR)
+        cv.create_text(PAD_L + 4, top + 4, text="VOL", fill=TEXT_COLOR,
+                       anchor="nw", font=("Arial", 8, "bold"))
+        if v_max <= 0:
+            return ""
+        body_w = max(1, min(slot * 0.7, 12))
+        base = top + h
+        for i, b in enumerate(bars):
+            x = PAD_L + slot * i + slot / 2
+            vh = (b.get("volume", 0.0) / v_max) * (h - 6)
+            color = UP_COLOR if b["close"] >= b["open"] else DOWN_COLOR
+            cv.create_rectangle(x - body_w / 2, base - vh, x + body_w / 2, base,
+                                fill=color, outline=color)
+        cv.create_text(W - PAD_R + 6, top + 4, text=_fmt_oi(v_max), fill=TEXT_COLOR,
+                       anchor="nw", font=("Arial", 8))
+        last_vol = bars[-1].get("volume", 0.0)
+        return f" · 거래량 {_fmt_oi(last_vol)}"
 
     def _draw_oi_panel(self, cv, bars, slot, PAD_L, PAD_R, W, top, h):
         """캔들 X축과 시간 정렬된 OI 라인+영역 서브차트. 반환: 인포바용 텍스트."""

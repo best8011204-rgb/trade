@@ -124,20 +124,26 @@ class LiveShadowRunner:
     def on_kline_msg(self, data):
         """모든 kline 스트림(1m/5m/1h/1d)의 공용 진입점.
 
-        - 확정(닫힌) 봉만 처리한다 (k["x"] == True).
-        - interval == "1m" 이면 기존 엔진 경로를 그대로 태운다.
-        - 모든 interval은 on_display_candle 훅(설정 시)으로 전달된다.
+        - 엔진(전략 로직)은 여전히 확정(닫힌) 1m봉만 소비한다 (k["x"] == True,
+          interval == "1m") — 트리거 구조를 바꾸지 않기 위해 절대 건드리지
+          않는다.
+        - 반면 GUI 표시용 훅(on_display_candle)에는 확정 여부와 무관하게
+          모든 kline 업데이트를 전달한다. Binance는 진행 중인 봉도 초당 한 번
+          꼴로 갱신을 보내주므로, 이 경로만으로 "1분마다"가 아니라 실시간에
+          가깝게(초 단위) 가격/거래량이 갱신된다 — 추가 REST 폴링 없이 이미
+          열려 있는 웹소켓만 활용한다.
         """
         k = data["k"]
-        if k["s"] != self.symbol.upper() or not k["x"]:
-            return  # 확정(닫힌) 봉만 사용
+        if k["s"] != self.symbol.upper():
+            return
         interval = k["i"]
+        closed = bool(k["x"])
         candle_dict = {
             "ts": k["t"] / 1000.0, "open": float(k["o"]), "high": float(k["h"]),
             "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]),
-            "closed": True,
+            "closed": closed,
         }
-        if interval == "1m":
+        if interval == "1m" and closed:
             c = Candle(ts=candle_dict["ts"], open=candle_dict["open"], high=candle_dict["high"],
                        low=candle_dict["low"], close=candle_dict["close"],
                        volume=candle_dict["volume"], cvd_delta=self.cvd_accum)
