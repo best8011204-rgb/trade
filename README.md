@@ -2,6 +2,64 @@
 
 `liquidationstrategyv1preregistration.md` 사전등록 명세를 코드로 옮긴 구현체.
 
+## 🤖 24시간 자동매매 봇 (실주문 + 텔레그램) — 로컬 실행
+
+노트북/PC에서 24시간 돌리는 실거래 봇. 전략 엔진(Setup A/B)이 만드는
+진입/청산 신호를 Binance USDT-M 선물에 **실제 시장가 주문**으로 실행하고,
+모든 진입/청산/오류를 텔레그램으로 알린다. 텔레그램에서 현황 조회와
+**전략 파라미터 실시간 수정**도 가능하다.
+
+### 준비
+
+1. **Binance API 키 발급** — Binance → API Management에서 생성.
+   권한은 "선물(Futures)" 활성화, 출금 권한은 **끄기**. (실계좌 전에
+   https://testnet.binancefuture.com 테스트넷 키로 먼저 검증 권장)
+2. **텔레그램 봇 생성** — 텔레그램에서 `@BotFather`에게 `/newbot` →
+   받은 토큰을 config에 넣는다.
+
+### 실행
+
+```bash
+pip install -r requirements.txt
+cp config.example.json config.json    # 키/토큰 채우기
+python3 run_bot.py
+```
+
+`config.json` 주요 항목:
+
+| 키 | 설명 |
+|---|---|
+| `live_trade` | `false`=페이퍼(주문 없음, 알림만), `true`=실주문 |
+| `testnet` | `true`면 바이낸스 선물 테스트넷 사용 |
+| `trade_usdt` | 포지션 1개당 명목가(USDT) |
+| `leverage` | 레버리지 (시작 시 자동 설정) |
+| `telegram_chat_id` | 비우면 최초 `/start` 보낸 사용자를 자동 바인딩 |
+
+봇을 시작한 뒤 텔레그램에서 봇에게 `/start`를 보내면 그 채팅이 관리자
+채팅으로 바인딩된다 (다른 사람은 명령 불가).
+
+### 텔레그램 명령
+
+- `/status` — 모드/현재가/상태머신/보유 포지션/잔고 요약
+- `/pnl`, `/trades [n]` — 청산 통계 / 최근 트레이드
+- `/params` — 현재 전략 파라미터 (A/B 전체)
+- `/set a vol_multiplier 2.5` — **파라미터 즉시 변경** (재시작에도 유지, `bot_state.json`에 저장)
+- `/pause` / `/resume` — 신규 진입 중지/재개 (청산은 계속 관리됨)
+- `/close all` — 실포지션 전량 시장가 청산
+
+### 매매 빈도 관련
+
+트리거 기본값이 v1 사전등록 값보다 **완화**되어 있다 (더 자주 발동):
+Setup A `vol_multiplier` 8→3, `min_chain` 3→2, `min_move_pct` 0.8%→0.4%,
+`exhaustion_gap_s` 90→45초, `rebound_pct` 0.15%→0.08%, `rebound_hold_s` 30→15초 /
+Setup B `oi_increase_pct` 1.5%→0.6%, `retest_window_s` 15분→30분.
+너무 잦거나 뜸하면 `/set` 명령으로 언제든 조정하면 된다.
+
+> ⚠️ 실거래는 원금 손실 위험이 있다. 반드시 페이퍼 → 테스트넷 → 소액
+> 순서로 검증한 뒤 `live_trade: true`로 전환할 것.
+
+---
+
 - **Setup A** — 청산 캐스케이드 소진 롱 (`liquidation_strategy/setup_a.py`)
 - **Setup B** — 트랩드롱 플러시 숏 (`liquidation_strategy/setup_b.py`)
 - **엔진** — 두 셋업의 상호배제/TP2 동적전환 규칙 (`liquidation_strategy/engine.py`)

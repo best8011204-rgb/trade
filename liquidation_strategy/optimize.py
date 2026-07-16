@@ -17,15 +17,15 @@ from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams
 
 A_GRID = {
-    "vol_multiplier": [6.0, 8.0, 10.0],
-    "min_move_pct": [0.006, 0.008, 0.012],
-    "exhaustion_gap_s": [60.0, 90.0, 120.0],
-    "rebound_pct": [0.0010, 0.0015, 0.0025],
+    "vol_multiplier": [2.0, 3.0, 5.0],
+    "min_move_pct": [0.003, 0.004, 0.006],
+    "exhaustion_gap_s": [30.0, 45.0, 90.0],
+    "rebound_pct": [0.0005, 0.0008, 0.0015],
 }
 
 B_GRID = {
-    "oi_increase_pct": [0.010, 0.015, 0.020],
-    "retest_window_s": [10 * 60, 15 * 60, 20 * 60],
+    "oi_increase_pct": [0.004, 0.006, 0.010],
+    "retest_window_s": [15 * 60, 30 * 60, 45 * 60],
 }
 
 # 사전 예측 범위 (명세서 1장/2장) — 최적화 시 이 범위를 벗어나면 감점

@@ -1,0 +1,14 @@
+{
+  "symbol": "btcusdt",
+  "live_trade": false,
+  "testnet": true,
+  "binance_api_key": "여기에_API_키",
+  "binance_api_secret": "여기에_API_시크릿",
+  "leverage": 3,
+  "trade_usdt": 100.0,
+  "telegram_bot_token": "여기에_봇파더가_준_토큰",
+  "telegram_chat_id": null,
+  "out_json": "liquidation_strategy_output_live.json",
+  "log_dir": "logs",
+  "state_file": "bot_state.json"
+}
