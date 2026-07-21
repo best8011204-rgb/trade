@@ -89,6 +89,12 @@ class LiveShadowRunner:
         self._a_log_seen = 0
         self._b_log_seen = 0
 
+        # 피드 생존 판정용 카운터 — "게이트 미충족"과 "입력 이벤트 자체가
+        # 안 들어옴"을 구분하려면 수신 이벤트 수를 별도로 세어야 한다.
+        self._liq_count_total = 0
+        self._liq_count_minute = 0
+        self._liq_minute_bucket = None
+
         # GUI 표시 전용 훅. 시그니처: fn(interval: str, candle: dict)
         # candle dict: {ts, open, high, low, close, volume, closed: True}
         self.on_display_candle = None
@@ -108,6 +114,18 @@ class LiveShadowRunner:
             return
         fo = ForceOrder(ts=o["T"] / 1000.0, side=o["S"], price=float(o["ap"] or o["p"]), qty=float(o["q"]))
         self._append_jsonl(self.event_log_path, {"type": "forceOrder", **data})
+
+        self._liq_count_total += 1
+        bucket = int(fo.ts // 60)
+        if bucket != self._liq_minute_bucket:
+            if self._liq_minute_bucket is not None:
+                print(f"[liq] {self._liq_minute_bucket*60:.0f} count={self._liq_count_minute} "
+                      f"total={self._liq_count_total} baseline_hr={self.engine.a._hourly_baseline}",
+                      file=sys.stderr)
+            self._liq_minute_bucket = bucket
+            self._liq_count_minute = 0
+        self._liq_count_minute += 1
+
         if fo.side == "SELL":
             self.baseline.add(fo.ts, fo.notional)
             self.engine.a.set_hourly_baseline(self.baseline.per_hour(fo.ts))
@@ -150,12 +168,20 @@ class LiveShadowRunner:
             self.engine.a.on_cvd_delta(c.ts, self.cvd_accum)
             self.cvd_accum = 0.0
 
-            self.candles.append(c)
+            # 박스는 "현재 캔들 이전"의 240봉으로 계산해야 한다 — c를 먼저 넣고
+            # 계산하면 box_high/low에 c 자신의 high/low가 포함되어 c.high가
+            # 자기 자신이 만든 상단을 절대 못 넘는 구조적 버그가 된다
+            # (Setup B의 `c.high > self.box_high` 돌파 판정이 영원히 False).
             lo = max(0, len(self.candles) - BOX_WINDOW_MIN)
             window = list(self.candles)[lo:]
-            box_low = min(x.low for x in window)
-            box_high = max(x.high for x in window)
-            self.engine.set_box(box_low, box_high)
+            if window:
+                box_low = min(x.low for x in window)
+                box_high = max(x.high for x in window)
+                self.engine.set_box(box_low, box_high)
+                print(f"[box] ts={c.ts:.0f} close={c.close:.1f} box_low={box_low:.1f} "
+                      f"box_high={box_high:.1f} b_state={self.engine.b.state} "
+                      f"a_state={self.engine.a.state}", file=sys.stderr)
+            self.candles.append(c)
             self.engine.on_candle(c, oi_now=self._latest_oi)
             self._flush_new_logs()
 
