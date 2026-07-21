@@ -130,7 +130,7 @@ class SettingsPage:
         ttk.Button(groups, text="Setup B 중지", command=self._stop_b).grid(
             row=1, column=1, sticky="w", padx=5, pady=(4, 0))
 
-        self.group_c = ParamGroup(groups, "Setup C — OU 평균회귀 (검증 전, 가설)", ParamsC)
+        self.group_c = ParamGroup(groups, "Setup C — Price×OI 상태 분류기 (C1+C2, 검증 전)", ParamsC)
         self.group_c.frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         ttk.Button(groups, text="Setup C 중지", command=self._stop_c).grid(
             row=1, column=2, sticky="w", padx=(5, 0), pady=(4, 0))

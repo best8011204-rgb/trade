@@ -156,6 +156,7 @@ class LiveEngineRunner:
 
         def on_oi_poll(oi_value, ts):
             orig_on_oi(oi_value, ts)
+            self.c_runner.on_oi(oi_value, ts)
             self.bus.publish("oi", {"ts": ts, "oi": oi_value})
         self.runner.on_oi_poll = on_oi_poll
 
@@ -280,14 +281,16 @@ class LiveEngineRunner:
 
         # 2) 웹소켓 스트림: 자체 asyncio 루프 (+ 텔레그램 봇, 토큰 있을 때)
         tg_note = " · 텔레그램 ON" if self._tg_bot else ""
+        ws_proxy = self._cfg.get("ws_proxy") or True
+        proxy_note = f" · WS 프록시 {ws_proxy}" if isinstance(ws_proxy, str) else ""
         self.bus.publish("status", {
             "running": True, "connected": True,
-            "message": f"실시간 연결 (웹소켓 + 1분 REST 폴백, 섀도 모드, 실주문 없음{tg_note}) — {self.symbol}",
+            "message": f"실시간 연결 (웹소켓 + 1분 REST 폴백, 섀도 모드, 실주문 없음{tg_note}{proxy_note}) — {self.symbol}",
         })
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         tasks = [
-            stream_loop(self.runner, self.runner.symbol),
+            stream_loop(self.runner, self.runner.symbol, proxy=ws_proxy),
             oi_poll_loop(self.runner, self.runner.symbol),
             snapshot_loop(self.runner),
             self._rest_kline_poll_loop(),

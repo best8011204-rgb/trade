@@ -134,7 +134,7 @@ class DashboardPage:
         self.trigger_a.pack(fill="x")
         self.trigger_b = TriggerSection(scroller.interior, "Setup B", theme.SHORT_RED, max_rows=4)
         self.trigger_b.pack(fill="x")
-        self.trigger_c = TriggerSection(scroller.interior, "Setup C", theme.ACCENT_YELLOW, max_rows=6)
+        self.trigger_c = TriggerSection(scroller.interior, "Setup C", theme.ACCENT_YELLOW, max_rows=8)
         self.trigger_c.pack(fill="x")
 
     def _build_center(self, body):
