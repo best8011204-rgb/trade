@@ -22,6 +22,7 @@ from collections import Counter
 
 import numpy as np
 import pandas as pd
+import requests
 
 from . import binance_client as bc
 from . import oi_features as feat
@@ -31,7 +32,8 @@ from .setup_c import (
 
 SYMBOL = "BTCUSDT"
 COST_BPS = 10.0
-OI_REST_MAX_DAYS = 30
+OI_REST_MAX_DAYS = 29  # Binance 문서상 한도는 30일이지만 요청 시점 지연/시계
+                       # 오차로 정확히 30일 폭 요청이 400을 반환하는 경우가 있어 여유를 둔다
 
 
 def _load_local_oi_log(path: str) -> pd.DataFrame:
@@ -70,7 +72,15 @@ def fetch_5m_with_oi(symbol: str = SYMBOL, days: int = 30,
     kdf = kdf[["ts", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
     oi_rest_start = max(start_ms, end_ms - OI_REST_MAX_DAYS * 86_400_000)
-    oi_hist = bc.get_open_interest_hist_range(symbol, "5m", oi_rest_start, end_ms)
+    try:
+        oi_hist = bc.get_open_interest_hist_range(symbol, "5m", oi_rest_start, end_ms)
+    except requests.exceptions.HTTPError as e:
+        # Binance의 openInterestHist 30일 한도 경계에서 400이 나는 경우가 있다 —
+        # OI 없이는 gate가 전부 NaN(미충족) 처리되니, 전체 백테스트를 죽이지 않고
+        # 로컬 누적 로그만으로 계속 진행한다.
+        print(f"[fetch_5m_with_oi] openInterestHist 요청 실패({e}) — 로컬 누적 로그만 사용",
+              file=sys.stderr)
+        oi_hist = []
     oi_rows = [{"ts": float(o["timestamp"]) / 1000.0, "oi": float(o["sumOpenInterest"])} for o in oi_hist]
     oi_df = pd.DataFrame(oi_rows, columns=["ts", "oi"])
 
