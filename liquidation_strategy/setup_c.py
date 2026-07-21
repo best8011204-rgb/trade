@@ -143,3 +143,131 @@ def tranche_exit_step(side: str, pos: dict, high: float, low: float, close: floa
     if bars_held >= time_exit_bars:
         return "TIME", close, remaining_fraction
     return None, None, None
+
+
+# ---------------------------------------------------------------- C1: OI-Flush Reversal Long
+
+@dataclass
+class SignalC1:
+    ts: pd.Timestamp
+    entry: float
+    stop: float
+    tp1: float
+    tp2: float
+    tp1_fraction: float
+    time_exit_bars: int
+    cascade_low: float
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass
+class C1State:
+    state: str = "IDLE"   # IDLE -> CASCADE -> WATCH_EXHAUST
+    cascade_start_i: int | None = None
+    cascade_low: float | None = None
+    cascade_start_price: float | None = None
+    oi_at_cascade_start: float | None = None
+    exhaust_confirm_run: int = 0
+
+
+def _min_history_c1(p: ParamsC) -> int:
+    return p.quantile_lookback_bars + p.atr_window + 2
+
+
+def advance_c1(f: pd.DataFrame, i: int, state: C1State, p: ParamsC):
+    if i < _min_history_c1(p):
+        return state, None
+    row = f.iloc[i]
+
+    if state.state == "IDLE":
+        window = f.iloc[i - p.c1_cascade_window_bars + 1: i + 1]
+        if len(window) < p.c1_cascade_window_bars:
+            return state, None
+        atr_now = row["atr"]
+        if not np.isfinite(atr_now) or atr_now <= 0:
+            return state, None
+        drop_atr = (window["close"].iloc[0] - window["close"].iloc[-1]) / atr_now
+        oi_chg, oi_gate = row["oi_chg_c1"], row["oi_chg_c1_qlo"]
+        rvol_now, rvol_gate = row["rvol"], row["rvol_qhi"]
+        if (drop_atr >= p.c1_price_drop_atr_mult
+                and np.isfinite(oi_chg) and np.isfinite(oi_gate) and oi_chg <= oi_gate
+                and np.isfinite(rvol_now) and np.isfinite(rvol_gate) and rvol_now >= rvol_gate):
+            return C1State(
+                state="CASCADE", cascade_start_i=i - p.c1_cascade_window_bars + 1,
+                cascade_low=float(window["low"].min()),
+                cascade_start_price=float(window["close"].iloc[0]),
+                oi_at_cascade_start=float(window["oi"].iloc[0]),
+            ), None
+        return state, None
+
+    if state.state == "CASCADE":
+        # 거부 조건: 하락 지속 중 OI가 순증(신규 숏 우세) -> 페이드 금지, IDLE로 리셋
+        if row["oi"] > state.oi_at_cascade_start and row["oi_chg_c1"] is not None and row["oi_chg_c1"] > 0:
+            return C1State(), None
+        return replace(state, state="WATCH_EXHAUST",
+                        cascade_low=min(state.cascade_low, float(row["low"]))), None
+
+    if state.state == "WATCH_EXHAUST":
+        if row["oi"] > state.oi_at_cascade_start and row["oi_chg_c1"] is not None and row["oi_chg_c1"] > 0:
+            return C1State(), None  # 소진 관찰 중에도 신규 숏 유입되면 무효화
+        state = replace(state, cascade_low=min(state.cascade_low, float(row["low"])))
+
+        oi_accel = row["oi_chg_c1"] - f["oi_chg_c1"].iloc[i - 1] if i > 0 else np.nan
+        decel = np.isfinite(oi_accel) and oi_accel > 0
+        reversal = (row["clv"] >= p.c1_reversal_clv_min) and (row["wick_asym"] >= p.c1_reversal_wick_ratio_min)
+
+        if decel and reversal:
+            state = replace(state, exhaust_confirm_run=state.exhaust_confirm_run + 1)
+        else:
+            state = replace(state, exhaust_confirm_run=0)
+
+        if state.exhaust_confirm_run >= p.c1_exhaustion_confirm_bars:
+            entry = float(row["close"])
+            cascade_range = state.cascade_start_price - state.cascade_low
+            if cascade_range <= 0:
+                return C1State(), None
+            tp1 = state.cascade_low + p.c1_tp1_retrace * cascade_range
+            tp2 = state.cascade_low + p.c1_tp2_retrace * cascade_range
+            stop = state.cascade_low * (1 - p.c1_sl_buffer_pct)
+            sig = SignalC1(ts=f.index[i], entry=entry, stop=stop, tp1=tp1, tp2=tp2,
+                            tp1_fraction=p.c1_tp1_fraction, time_exit_bars=p.c1_time_exit_bars,
+                            cascade_low=state.cascade_low,
+                            meta={"cascade_start_i": state.cascade_start_i})
+            return C1State(), sig
+
+        # 소진 무한 대기 방지: 캐스케이드 창의 6배 지나도 안 되면 포기
+        if i - state.cascade_start_i > p.c1_cascade_window_bars * 6:
+            return C1State(), None
+        return state, None
+
+    return C1State(), None
+
+
+def conditions_c1(f: pd.DataFrame, i: int, state: C1State, p: ParamsC) -> list[dict]:
+    """GUI 실시간 체크리스트. 상태에 따라 관련 있는 조건만 표시."""
+    if i < _min_history_c1(p):
+        return [{"key": "c1_hist", "label": "C1: 히스토리 축적 중", "met": False, "detail": "대기"}]
+    row = f.iloc[i]
+    out = [{"key": "c1_state", "label": f"C1 상태: {state.state}", "met": state.state != "IDLE",
+            "detail": state.state}]
+    if state.state == "IDLE":
+        window = f.iloc[max(0, i - p.c1_cascade_window_bars + 1): i + 1]
+        atr_now = row["atr"]
+        drop_atr = ((window["close"].iloc[0] - window["close"].iloc[-1]) / atr_now
+                    if np.isfinite(atr_now) and atr_now > 0 and len(window) == p.c1_cascade_window_bars else np.nan)
+        out.append({"key": "c1_drop", "label": f"가격하락 >= ATRx{p.c1_price_drop_atr_mult}",
+                    "met": bool(np.isfinite(drop_atr) and drop_atr >= p.c1_price_drop_atr_mult),
+                    "detail": f"{drop_atr:.2f}x" if np.isfinite(drop_atr) else "계산불가"})
+        out.append({"key": "c1_oi", "label": f"DeltaOI 하위{p.c1_oi_drop_quantile*100:.0f}%",
+                    "met": bool(np.isfinite(row["oi_chg_c1"]) and np.isfinite(row["oi_chg_c1_qlo"])
+                                and row["oi_chg_c1"] <= row["oi_chg_c1_qlo"]),
+                    "detail": f"{row['oi_chg_c1']*100:.2f}%" if np.isfinite(row["oi_chg_c1"]) else "N/A"})
+        out.append({"key": "c1_rvol", "label": f"RVOL 상위{(1-p.c1_rvol_quantile)*100:.0f}%",
+                    "met": bool(np.isfinite(row["rvol"]) and np.isfinite(row["rvol_qhi"])
+                                and row["rvol"] >= row["rvol_qhi"]),
+                    "detail": f"{row['rvol']:.2f}" if np.isfinite(row["rvol"]) else "N/A"})
+    elif state.state == "WATCH_EXHAUST":
+        out.append({"key": "c1_exhaust", "label": f"소진확인 {state.exhaust_confirm_run}/{p.c1_exhaustion_confirm_bars}봉",
+                    "met": state.exhaust_confirm_run >= p.c1_exhaustion_confirm_bars,
+                    "detail": f"캐스케이드저점 {state.cascade_low:,.1f}"})
+    return out
