@@ -96,6 +96,7 @@ class LiveShadowRunner:
         self.event_log_path = os.path.join(log_dir, "raw_events.jsonl")
         self.trade_log_path = os.path.join(log_dir, "shadow_trades.jsonl")
         self.signal_log_path = os.path.join(log_dir, "signals.jsonl")
+        self.oi_log_path = os.path.join(log_dir, "oi_history.jsonl")
 
     def _append_jsonl(self, path, obj):
         with open(path, "a", encoding="utf-8") as f:
@@ -169,6 +170,7 @@ class LiveShadowRunner:
 
     def on_oi_poll(self, oi_value, ts):
         self._latest_oi = oi_value
+        self._append_jsonl(self.oi_log_path, {"ts": ts, "oi": oi_value})
         self.engine.on_oi(OIPoint(ts=ts, oi=oi_value))
 
     def _flush_new_logs(self):
@@ -233,13 +235,17 @@ def build_stream_names(symbol: str):
     return names
 
 
-async def stream_loop(runner: LiveShadowRunner, symbol: str):
+async def stream_loop(runner: LiveShadowRunner, symbol: str, proxy=True):
+    """proxy: websockets.connect()에 그대로 전달.
+    True(기본) = HTTPS_PROXY/ALL_PROXY 환경변수 자동 감지(기존 동작과 동일).
+    문자열(예: "socks5://127.0.0.1:1080") = 그 프록시로 이 웹소켓 연결만 강제 우회.
+    지역 차단 등으로 fstream이 핸드셰이크는 되는데 데이터가 안 오는 경우 사용."""
     streams = "/".join(build_stream_names(symbol))
     url = STREAM_URL.format(streams=streams)
     backoff = 1
     while True:
         try:
-            async with websockets.connect(url, ping_interval=180, ping_timeout=60) as ws:
+            async with websockets.connect(url, proxy=proxy, ping_interval=180, ping_timeout=60) as ws:
                 print(f"[stream] connected: {url}", file=sys.stderr)
                 backoff = 1
                 async for raw in ws:
@@ -259,23 +265,30 @@ async def stream_loop(runner: LiveShadowRunner, symbol: str):
             backoff = min(backoff * 2, 60)
 
 
-async def main_async(symbol: str, out_json: str, log_dir: str):
+async def main_async(symbol: str, out_json: str, log_dir: str, proxy=True):
     runner = LiveShadowRunner(symbol=symbol, out_json=out_json, log_dir=log_dir)
     await asyncio.gather(
-        stream_loop(runner, symbol),
+        stream_loop(runner, symbol, proxy=proxy),
         oi_poll_loop(runner, symbol),
         snapshot_loop(runner),
     )
 
 
 def main():
+    from .bot_config import load_config
+
+    cfg = load_config(quiet=True)
     ap = argparse.ArgumentParser(description="실시간 섀도 검증 러너 (실주문 없음)")
     ap.add_argument("--symbol", default=SYMBOL)
     ap.add_argument("--out", default="liquidation_strategy_output_live.json")
     ap.add_argument("--log-dir", default="logs")
+    ap.add_argument("--ws-proxy", default=cfg.get("ws_proxy") or None,
+                     help='웹소켓 전용 프록시 (예: socks5://127.0.0.1:1080). '
+                          '미지정 시 config.json의 ws_proxy 또는 HTTPS_PROXY 환경변수 자동 감지.')
     args = ap.parse_args()
+    proxy = args.ws_proxy if args.ws_proxy else True
     try:
-        asyncio.run(main_async(args.symbol, args.out, args.log_dir))
+        asyncio.run(main_async(args.symbol, args.out, args.log_dir, proxy=proxy))
     except KeyboardInterrupt:
         print("\n종료.", file=sys.stderr)
 
