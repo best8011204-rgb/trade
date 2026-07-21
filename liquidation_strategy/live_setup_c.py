@@ -1,11 +1,11 @@
-"""Setup C 실시간 러너 — 확정 5분봉 스트림 위에서 evaluate_bar/should_exit를
-한 봉씩 구동한다. StrategyEngine과는 완전히 독립적이지만(엔진 코드 무수정),
-GUI(Dashboard/Settings/PnL/Log)에는 A/B와 동일한 수준으로 연동된다.
+"""Setup C 실시간 러너 — 확정 5분봉 스트림 위에서 C1(OI-Flush Reversal Long)과
+C2(Coil-Break OI Filter)를 동시에 구동한다. StrategyEngine과는 완전히
+독립적이지만, GUI(Dashboard/Settings/PnL/Log)에는 A/B와 동일한 수준으로
+연동된다 — 공개 메서드 시그니처는 이전 버전(OU 평균회귀)과 동일하게 유지.
 
-라이브 모드: live_feed.py가 이미 구독 중인 btcusdt@kline_5m 확정봉을 그대로
-받는다 (실데이터, 집계 없음).
-합성 모드: MinuteAggregator로 1분봉을 5분봉으로 직접 집계해 같은 인터페이스로
-공급한다 (candle_chart.py가 표시용으로 하는 집계와 동일한 방식, 별도 모듈).
+라이브 모드: live_feed.py가 이미 구독 중인 btcusdt@kline_5m 확정봉 +
+oi_poll_loop(5분 REST)의 OI 값을 받는다(신규 on_oi 훅).
+합성 모드: MinuteAggregator로 1분봉을 5분봉으로 집계해 같은 인터페이스로 공급.
 """
 
 from __future__ import annotations
@@ -14,27 +14,18 @@ from collections import deque
 
 import pandas as pd
 
-from .setup_c import ParamsC, evaluate_bar, should_exit, conditions as gate_conditions
-from .backtest_c import Ledger, _bps, _r_multiple
+from .setup_c import (
+    ParamsC, compute_features, advance_c1, advance_c2, C1State, C2State,
+    conditions_c1, conditions_c2,
+)
+from .backtest_c import Ledger
 
-MAX_BARS_KEPT = 500
-COST_BPS = 10.0
-
-
-def _max_consec_losses(trades: list) -> int:
-    m = cur = 0
-    for t in sorted(trades, key=lambda x: x["exit_ts"]):
-        if t["bps"] <= 0:
-            cur += 1
-            m = max(m, cur)
-        else:
-            cur = 0
-    return m
+MAX_BARS_KEPT = 3000   # quantile_lookback_bars(기본 2016) + 여유
 
 
 class MinuteAggregator:
     """1분봉 -> N초 버킷 집계기. 합성 모드에서 Setup C(5분봉 전용)를 구동하기
-    위해서만 쓰인다 — 라이브 모드는 바이낸스가 5분봉을 직접 주므로 불필요."""
+    위해서만 쓰인다."""
 
     def __init__(self, bucket_s: int, on_bar_closed):
         self.bucket_s = bucket_s
@@ -56,62 +47,85 @@ class MinuteAggregator:
 
 
 class LiveSetupCRunner:
-    """확정 5분봉 하나씩 받아 Setup C를 구동. 실주문 없음(섀도/페이퍼 전용,
-    A/B와 동일한 프로젝트 전역 원칙)."""
+    """확정 5분봉 하나씩 받아 C1/C2를 동시 구동. 실주문 없음(섀도/페이퍼)."""
 
     def __init__(self, params: ParamsC = None):
         self.p = params or ParamsC()
         self.enabled = True
         self._rows = deque(maxlen=MAX_BARS_KEPT)
-        self.ledgers = {"long": Ledger("long"), "short": Ledger("short")}
+        self._latest_oi = None
+
+        self.c1_state = C1State()
+        self.c2_state = C2State()
+        self.ledger_c1 = Ledger("C1")
+        self.ledger_c2 = Ledger("C2")
+
         self.closed_trades: list[dict] = []
-        self.log: list[tuple] = []          # (ts, msg) — A/B의 log 리스트와 동일 패턴
-        self._last_conditions: list[dict] = []
+        self.log: list[tuple] = []
+        self._c1_conditions: list[dict] = []
+        self._c2_conditions: list[dict] = []
 
     # ------------------------------------------------------------------
+    def on_oi(self, oi_value: float, ts: float):
+        """live_engine_bridge.py의 oi_poll(5분 REST) 후크에서 호출."""
+        self._latest_oi = oi_value
+
     def on_confirmed_5m_candle(self, candle: dict):
         """candle: {ts, open, high, low, close, volume, closed(무시)}."""
-        self._rows.append(candle)
-        if len(self._rows) < 2:
-            return
-        df = self._to_df()
-        i = len(df) - 1
+        row = dict(candle)
+        row["oi"] = self._latest_oi if self._latest_oi is not None else float("nan")
+        self._rows.append(row)
+        if len(self._rows) < 3:
+            return  # rolling()/iloc[i-1] 접근이 안전하려면 최소 몇 행은 필요.
+                    # 히스토리 부족(quantile_lookback_bars 미만)은 advance_c1/advance_c2
+                    # 내부의 _min_history_c1/_min_history_c2 가드가 이미 처리한다.
+        f = compute_features(self._to_df(), self.p)
+        i = len(f) - 1
 
-        for side, ledger in self.ledgers.items():
-            pos = ledger.open_pos
-            if pos is None:
-                continue
-            pos["bars_held"] += 1
-            reason = should_exit(df, i, pos["sig"], pos["bars_held"], self.p)
-            if reason is None:
-                continue
-            exit_price = float(pos["sig"].stop) if reason == "sl" else float(df["close"].iloc[i])
-            exit_ts = df.index[i].timestamp()
-            bps = _bps(pos["sig"], exit_price, side) - COST_BPS
-            trade = {
-                "setup": "C", "side": side.upper(), "entry_ts": pos["sig"].ts.timestamp(),
-                "entry_price": pos["sig"].entry, "exit_ts": exit_ts, "exit_price": exit_price,
-                "reason": reason.upper(), "bars_held": pos["bars_held"], "bps": bps,
-                "r_multiple": _r_multiple(pos["sig"], exit_price, side), "tag": f"C-{side}",
-            }
-            self.closed_trades.append(trade)
-            self.log.append((exit_ts, f"Setup C {side.upper()} {reason} 청산 @ {exit_price:,.1f} ({bps:+.1f}bps)"))
-            ledger._on_exit(reason, i, pos["sig"].half_life_bars, self.p)
-            ledger.open_pos = None
+        self._step_c1(f, i)
+        self._step_c2(f, i)
 
-        self._last_conditions = gate_conditions(df, i, self.p)
+        self._c1_conditions = conditions_c1(f, i, self.c1_state, self.p)
+        self._c2_conditions = conditions_c2(f, i, self.c2_state, self.p)
 
         if not self.enabled:
             return
-        res = evaluate_bar(df, i, self.p)
-        if not res["pass"]:
-            return
-        sig = res["signal"]
-        ledger = self.ledgers[sig.side]
-        if ledger.can_enter(i):
-            ledger.open_pos = {"sig": sig, "bars_held": 0}
-            self.log.append((sig.ts.timestamp(),
-                              f"Setup C {sig.side.upper()} 진입 신호 @ {sig.entry:,.1f} (z={sig.z:+.2f}, VR={sig.vr:.2f})"))
+
+        self.c1_state, sig1 = advance_c1(f, i, self.c1_state, self.p)
+        if sig1 is not None and self.ledger_c1.can_enter(i):
+            self.ledger_c1.open("long", sig1, i)
+            self.log.append((sig1.ts.timestamp(),
+                              f"Setup C1 LONG 진입 신호 @ {sig1.entry:,.1f} (캐스케이드저점 {sig1.cascade_low:,.1f})"))
+
+        self.c2_state, sig2 = advance_c2(f, i, self.c2_state, self.p)
+        if sig2 is not None and self.ledger_c2.can_enter(i):
+            self.ledger_c2.open(sig2.side, sig2, i, extra={"kind": sig2.kind})
+            self.log.append((sig2.ts.timestamp(),
+                              f"Setup C2 {sig2.side.upper()} 진입 신호 @ {sig2.entry:,.1f} ({sig2.kind})"))
+
+    def _step_c1(self, f, i):
+        row = f.iloc[i]
+        trade = self.ledger_c1.step(i, row["high"], row["low"], row["close"], f.index[i], self.p.c1_max_reentries)
+        if trade is not None:
+            self._record_closed("C1", trade)
+
+    def _step_c2(self, f, i):
+        row = f.iloc[i]
+        trade = self.ledger_c2.step(i, row["high"], row["low"], row["close"], f.index[i], self.p.c2_max_reentries)
+        if trade is not None:
+            self._record_closed("C2", trade)
+
+    def _record_closed(self, setup: str, trade: dict):
+        rec = {
+            "setup": setup, "side": trade["side"].upper(), "entry_ts": trade["entry_ts"].timestamp(),
+            "entry_price": trade["entry_price"], "exit_ts": trade["exit_ts"].timestamp(),
+            "exit_price": trade["exit_price"], "reason": trade["reason"],
+            "bars_held": trade["bars_held"], "bps": trade["bps"], "r_multiple": trade["r_multiple"],
+            "tag": f"{setup}-{trade['side']}",
+        }
+        self.closed_trades.append(rec)
+        self.log.append((rec["exit_ts"],
+                          f"Setup {setup} {rec['side']} {rec['reason']} 청산 @ {rec['exit_price']:,.1f} ({rec['bps']:+.1f}bps)"))
 
     def _to_df(self) -> pd.DataFrame:
         df = pd.DataFrame(list(self._rows))
@@ -119,62 +133,58 @@ class LiveSetupCRunner:
         return df
 
     # ------------------------------------------------------------------
-    # GUI/Settings 연동용
+    # GUI/Settings 연동용 — 공개 인터페이스는 이전 버전과 동일하게 유지
     # ------------------------------------------------------------------
     def stop(self):
-        """진행 중 포지션은 기록 없이 버리고, 재시작 전까지 신규 진입을 멈춘다
-        (StrategyEngine.stop_setup과 동일한 의미론)."""
-        for ledger in self.ledgers.values():
-            ledger.open_pos = None
+        self.ledger_c1.pos = None
+        self.ledger_c2.pos = None
         self.enabled = False
 
     def restart(self, params: ParamsC):
-        """새 파라미터로 초기 상태부터 즉시 재시작 (StrategyEngine.restart_setup과 동일)."""
         self.p = params
-        for ledger in self.ledgers.values():
-            ledger.open_pos = None
-            ledger.reentry_count = 0
-            ledger.cooldown_until_bar = None
+        self.c1_state = C1State()
+        self.c2_state = C2State()
+        self.ledger_c1 = Ledger("C1")
+        self.ledger_c2 = Ledger("C2")
         self.enabled = True
 
     def open_legs_view(self) -> list[dict]:
-        """A/B의 OpenLeg 직렬화와 같은 모양으로 맞춰 position 테이블에 나란히 표시.
-        C는 TP가 고정가가 아니라 z_exit 조건이라 tp1/tp2는 None(=GUI에 "-")."""
         out = []
-        for side, ledger in self.ledgers.items():
-            pos = ledger.open_pos
+        for setup, ledger in (("C1", self.ledger_c1), ("C2", self.ledger_c2)):
+            pos = ledger.pos
             if pos is None:
                 continue
-            sig = pos["sig"]
             out.append({
-                "setup": "C", "side": side.upper(), "entry_price": sig.entry,
-                "qty_fraction": 1.0, "sl": sig.stop, "tp1": None, "tp2": None,
-                "tp1_hit": False, "tag": f"C-{side}",
+                "setup": setup, "side": pos["side"].upper(), "entry_price": pos["entry"],
+                "qty_fraction": 1.0 if not pos["tp1_hit"] else 1 - pos["tp1_fraction"],
+                "sl": pos["stop"], "tp1": pos["tp1"], "tp2": pos["tp2"],
+                "tp1_hit": pos["tp1_hit"], "tag": f"{setup}-{pos['side']}",
             })
         return out
 
     def describe(self) -> str:
-        """대시보드 상단 요약 1줄 (Setup A/B의 describe()와 동일한 역할)."""
-        if not self._last_conditions:
-            return "히스토리 축적 중 (5분봉 데이터 대기)"
-        met = sum(1 for c in self._last_conditions if c["met"])
-        total = len(self._last_conditions)
+        if not self._c1_conditions and not self._c2_conditions:
+            return "히스토리 축적 중 (5분봉+OI 데이터 대기)"
         if not self.enabled:
-            return f"중지됨 (충족조건 {met}/{total}) — \"적용\"으로 재시작 대기"
-        if met == total:
-            return f"모든 게이트 충족({met}/{total}) — 다음 확정봉에 진입 판정"
-        failed = [c["label"] for c in self._last_conditions if not c["met"]]
-        return f"게이트 대기 중({met}/{total}) — 미충족: {', '.join(failed)}"
+            return "중지됨 — \"적용\"으로 재시작 대기"
+        parts = []
+        if self._c1_conditions:
+            met = sum(1 for c in self._c1_conditions if c["met"])
+            parts.append(f"C1 {met}/{len(self._c1_conditions)}")
+        if self._c2_conditions:
+            met = sum(1 for c in self._c2_conditions if c["met"])
+            parts.append(f"C2 {met}/{len(self._c2_conditions)}")
+        return " · ".join(parts)
 
     def summary(self) -> dict:
         out = {}
-        for side in ("long", "short"):
-            trades = [t for t in self.closed_trades if t["side"] == side.upper()]
+        for setup in ("C1", "C2"):
+            trades = [t for t in self.closed_trades if t["setup"] == setup]
             if not trades:
-                out[side] = {"count": 0}
+                out[setup] = {"count": 0}
                 continue
             wins = [t for t in trades if t["bps"] > 0]
-            out[side] = {
+            out[setup] = {
                 "count": len(trades),
                 "win_rate": len(wins) / len(trades),
                 "avg_bps": sum(t["bps"] for t in trades) / len(trades),
@@ -183,9 +193,7 @@ class LiveSetupCRunner:
         return out
 
     def combined_summary(self) -> dict:
-        """롱+숏 합산 — Setup A/B와 동일한 모양(count/win_rate/avg_bps/avg_r/
-        max_consec_losses)으로 맞춰 PnL 위젯에 한 행("C")으로 표시하기 위함.
-        방향별 상세는 summary()/Log 탭의 개별 트레이드 로그로 확인한다."""
+        """C1+C2 합산 — PnL 위젯의 단일 "C" 행에 표시(기존 GUI 스키마 불변)."""
         trades = self.closed_trades
         if not trades:
             return {"count": 0}
@@ -200,4 +208,17 @@ class LiveSetupCRunner:
 
     @property
     def last_conditions(self) -> list[dict]:
-        return self._last_conditions
+        def _prefix(conds, tag):
+            return [{**c, "label": f"{tag} {c['label']}"} for c in conds]
+        return _prefix(self._c1_conditions, "[C1]") + _prefix(self._c2_conditions, "[C2]")
+
+
+def _max_consec_losses(trades: list) -> int:
+    m = cur = 0
+    for t in sorted(trades, key=lambda x: x["exit_ts"]):
+        if t["bps"] <= 0:
+            cur += 1
+            m = max(m, cur)
+        else:
+            cur = 0
+    return m
