@@ -271,3 +271,139 @@ def conditions_c1(f: pd.DataFrame, i: int, state: C1State, p: ParamsC) -> list[d
                     "met": state.exhaust_confirm_run >= p.c1_exhaustion_confirm_bars,
                     "detail": f"캐스케이드저점 {state.cascade_low:,.1f}"})
     return out
+
+
+# ---------------------------------------------------------------- C2: Coil-Break with OI Filter
+
+@dataclass
+class SignalC2:
+    ts: pd.Timestamp
+    side: str          # "long" | "short"
+    kind: str           # "momentum" | "fade"
+    entry: float
+    stop: float
+    tp1: float
+    tp2: float
+    tp1_fraction: float
+    time_exit_bars: int
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass
+class C2State:
+    state: str = "IDLE"  # IDLE -> COIL -> BREAKOUT_PENDING
+    coil_start_i: int | None = None
+    box_low: float | None = None
+    box_high: float | None = None
+    oi_at_coil_start: float | None = None
+    breakout_i: int | None = None
+    breakout_side: str | None = None  # "up" | "down"
+    breakout_sweep: float | None = None
+
+
+def _min_history_c2(p: ParamsC) -> int:
+    return p.quantile_lookback_bars + max(p.atr_window, p.c2_coil_window_bars) + 2
+
+
+def _box_exits(entry: float, state: C2State, side: str, kind: str, p: ParamsC):
+    rng = state.box_high - state.box_low
+    if kind == "fade":
+        if side == "short":
+            stop = state.breakout_sweep * (1 + p.c2_sl_buffer_pct)
+            tp2 = state.box_low
+            tp1 = entry - 0.5 * (entry - tp2)
+        else:
+            stop = state.breakout_sweep * (1 - p.c2_sl_buffer_pct)
+            tp2 = state.box_high
+            tp1 = entry + 0.5 * (tp2 - entry)
+    else:  # momentum
+        if side == "long":
+            stop = state.box_high * (1 - p.c2_sl_buffer_pct)
+            tp1, tp2 = entry + rng, entry + 2 * rng
+        else:
+            stop = state.box_low * (1 + p.c2_sl_buffer_pct)
+            tp1, tp2 = entry - rng, entry - 2 * rng
+    return stop, tp1, tp2
+
+
+def advance_c2(f: pd.DataFrame, i: int, state: C2State, p: ParamsC):
+    if i < _min_history_c2(p):
+        return state, None
+    row = f.iloc[i]
+
+    if state.state == "IDLE":
+        window = f.iloc[i - p.c2_coil_window_bars + 1: i + 1]
+        if len(window) < p.c2_coil_window_bars:
+            return state, None
+        rr, rr_gate = row["realized_range_c2"], row["realized_range_c2_qlo"]
+        oi_trend, oi_gate = row["oi_trend_c2"], row["oi_trend_c2_qhi"]
+        vol_med, vol_gate = row["vol_med_c2"], row["vol_med_c2_qlo"]
+        if (np.isfinite(rr) and np.isfinite(rr_gate) and rr <= rr_gate
+                and np.isfinite(oi_trend) and np.isfinite(oi_gate) and oi_trend >= oi_gate
+                and np.isfinite(vol_med) and np.isfinite(vol_gate) and vol_med <= vol_gate):
+            return C2State(
+                state="COIL", coil_start_i=i - p.c2_coil_window_bars + 1,
+                box_low=float(window["low"].min()), box_high=float(window["high"].max()),
+                oi_at_coil_start=float(window["oi"].iloc[0]),
+            ), None
+        return state, None
+
+    if state.state == "COIL":
+        if row["close"] > state.box_high:
+            return replace(state, state="BREAKOUT_PENDING", breakout_i=i,
+                            breakout_side="up", breakout_sweep=float(row["high"])), None
+        if row["close"] < state.box_low:
+            return replace(state, state="BREAKOUT_PENDING", breakout_i=i,
+                            breakout_side="down", breakout_sweep=float(row["low"])), None
+        if i - state.coil_start_i > p.c2_coil_window_bars * 3:
+            return C2State(), None
+        return replace(state, box_low=min(state.box_low, float(row["low"])),
+                        box_high=max(state.box_high, float(row["high"]))), None
+
+    if state.state == "BREAKOUT_PENDING":
+        entry = float(row["close"])
+        oi_chg, fade_gate = row["oi_chg_c2_breakout"], row["oi_chg_c2_qlo"]
+        rvol_now, momentum_gate = row["rvol"], row["rvol_c2_qhi"]
+
+        if np.isfinite(oi_chg) and np.isfinite(fade_gate) and oi_chg <= fade_gate:
+            side = "short" if state.breakout_side == "up" else "long"
+            stop, tp1, tp2 = _box_exits(entry, state, side, "fade", p)
+            sig = SignalC2(ts=f.index[i], side=side, kind="fade", entry=entry, stop=stop,
+                            tp1=tp1, tp2=tp2, tp1_fraction=p.c2_tp1_fraction,
+                            time_exit_bars=p.c2_time_exit_bars, meta={"box": (state.box_low, state.box_high)})
+            return C2State(), sig
+
+        if (row["oi"] > state.oi_at_coil_start and np.isfinite(rvol_now)
+                and np.isfinite(momentum_gate) and rvol_now >= momentum_gate):
+            side = "long" if state.breakout_side == "up" else "short"
+            stop, tp1, tp2 = _box_exits(entry, state, side, "momentum", p)
+            sig = SignalC2(ts=f.index[i], side=side, kind="momentum", entry=entry, stop=stop,
+                            tp1=tp1, tp2=tp2, tp1_fraction=p.c2_tp1_fraction,
+                            time_exit_bars=p.c2_time_exit_bars, meta={"box": (state.box_low, state.box_high)})
+            return C2State(), sig
+
+        if i - state.breakout_i > 2:   # 판정 보류 2봉까지, 그 이상은 포기
+            return C2State(), None
+        return state, None
+
+    return C2State(), None
+
+
+def conditions_c2(f: pd.DataFrame, i: int, state: C2State, p: ParamsC) -> list[dict]:
+    if i < _min_history_c2(p):
+        return [{"key": "c2_hist", "label": "C2: 히스토리 축적 중", "met": False, "detail": "대기"}]
+    row = f.iloc[i]
+    out = [{"key": "c2_state", "label": f"C2 상태: {state.state}", "met": state.state != "IDLE",
+            "detail": state.state}]
+    if state.state == "IDLE":
+        out.append({"key": "c2_range", "label": f"레인지 응축(하위{p.c2_coil_range_quantile*100:.0f}%)",
+                    "met": bool(np.isfinite(row["realized_range_c2"]) and np.isfinite(row["realized_range_c2_qlo"])
+                                and row["realized_range_c2"] <= row["realized_range_c2_qlo"]),
+                    "detail": f"{row['realized_range_c2']*100:.2f}%" if np.isfinite(row["realized_range_c2"]) else "N/A"})
+        out.append({"key": "c2_oi", "label": f"OI 축적(상위{(1-p.c2_oi_rise_quantile)*100:.0f}%)",
+                    "met": bool(np.isfinite(row["oi_trend_c2"]) and np.isfinite(row["oi_trend_c2_qhi"])
+                                and row["oi_trend_c2"] >= row["oi_trend_c2_qhi"]),
+                    "detail": f"{row['oi_trend_c2']*100:.2f}%" if np.isfinite(row["oi_trend_c2"]) else "N/A"})
+    elif state.state == "BREAKOUT_PENDING":
+        out.append({"key": "c2_dir", "label": "돌파 방향", "met": True, "detail": state.breakout_side})
+    return out

@@ -758,25 +758,35 @@ from liquidation_strategy.setup_c import ParamsC, compute_features, advance_c2, 
 p = ParamsC(quantile_lookback_bars=200, atr_window=14, c2_coil_window_bars=20)
 n = 400
 rng = np.random.default_rng(2)
-close = np.full(n, 100.0)
-oi = 1000 + np.arange(n) * 0.0
-vol = rng.uniform(1, 2, n)
+
+# 사전 히스토리는 평범한 변동성의 랜덤워크(코일이 '압축'으로 보이려면
+# 기준 분포에 변동성이 있어야 한다 — 완전히 평평하면 코일 쪽이 오히려
+# '더 넓은' 레인지가 되어버려 압축 게이트가 절대 통과하지 않는다).
+close = 100 + np.cumsum(rng.normal(0, 0.1, n))
+oi = 1000 + np.cumsum(rng.normal(0, 1.0, n))
+vol = rng.uniform(1, 5, n)
+high = close + rng.uniform(0.05, 0.3, n)
+low = close - rng.uniform(0.05, 0.3, n)
 
 coil_start = 250
-for k in range(20):
-    close[coil_start+k] = 100 + rng.normal(0, 0.02)
-    oi[coil_start+k] = 1000 + k * 3.0   # 코일 동안 OI 꾸준히 증가
-    vol[coil_start+k] = 1.0             # 거래량 수축
+coil_len = 20
+base = close[coil_start-1]
+for k in range(coil_len):
+    close[coil_start+k] = base + rng.normal(0, 0.01)   # 사전 히스토리보다 훨씬 좁은 변동
+    oi[coil_start+k] = oi[coil_start-1] + k * 3.0       # 코일 동안 OI 꾸준히 증가
+    vol[coil_start+k] = rng.uniform(0.2, 0.4)           # 거래량 수축
+    high[coil_start+k] = close[coil_start+k] + 0.02
+    low[coil_start+k] = close[coil_start+k] - 0.02
 
-breakout = coil_start + 20
-close[breakout] = 103.0   # 박스 상단 돌파
-oi[breakout] = oi[breakout-1] + 20.0   # 돌파 직후 OI 계속 증가
-vol[breakout] = 30.0                    # 거래량 팽창 -> 모멘텀 조건
-
-high = close + 0.1
-low = close - 0.1
-high[breakout] = 103.2
-oi[breakout+1:] = oi[breakout] + np.arange(n - breakout - 1) * 0.0 + oi[breakout]
+breakout = coil_start + coil_len
+box_high_val = max(high[coil_start:breakout])
+for k in range(3):   # 돌파봉 + 후속 2봉, 전부 돌파 방향으로 이어짐(판정 보류 구간 대비)
+    idx = breakout + k
+    close[idx] = box_high_val + 3.0 + k * 0.5
+    high[idx] = close[idx] + 0.2
+    low[idx] = box_high_val + 0.1
+    oi[idx] = oi[breakout - 1] + 20.0 + k * 5.0         # 돌파 직후 OI 계속 증가
+    vol[idx] = 40.0                                      # 거래량 팽창 -> 모멘텀 조건
 
 df = pd.DataFrame({'ts': np.arange(n)*300.0, 'open': close, 'high': high, 'low': low,
                     'close': close, 'volume': vol, 'oi': oi})
@@ -793,6 +803,7 @@ for i in range(len(f)):
 
 assert signal is not None, 'C2 모멘텀 신호가 발생해야 한다'
 assert signal.side == 'long' and signal.kind == 'momentum'
+assert signal.stop < signal.entry < signal.tp1 < signal.tp2
 print('C2 signal:', signal)
 print('setup_c.py Task4 (C2) OK')
 "
