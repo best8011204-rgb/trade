@@ -162,10 +162,12 @@ class CommandHandler:
     run_bot.py 는 bus 없이 생성하면 되고, 이 경우 그냥 조용히 건너뛴다.
     """
 
-    def __init__(self, runner, state: BotState, bus=None):
+    def __init__(self, runner, state: BotState, bus=None, c_runner=None):
         self.runner = runner
         self.state = state
         self.bus = bus
+        self.c_runner = c_runner  # Setup C(C1+C2) 러너 — GUI(run_all.py) 경로에서만 있음.
+                                   # 헤드리스 run_bot.py는 Setup C를 안 돌리므로 None 그대로 둔다.
 
     def _log(self, msg: str):
         if self.bus is not None:
@@ -179,7 +181,10 @@ class CommandHandler:
             if cmd in ("/start", "/help"):
                 return HELP
             if cmd == "/status":
-                return self.runner.status_summary()
+                text = self.runner.status_summary()
+                if self.c_runner is not None:
+                    text += "\n\n" + self._status_c()
+                return text
             if cmd == "/pnl":
                 return self._pnl()
             if cmd == "/trades":
@@ -212,6 +217,27 @@ class CommandHandler:
             return f"⚠️ 명령 처리 오류: {e}"
 
     # ---- 세부 구현 -------------------------------------------------------
+    def _status_c(self) -> str:
+        """/status 에 Setup C(C1+C2) 블록을 덧붙인다. live_trade.LiveTradingRunner.
+        status_summary()와 같은 형식(상태 요약 + 보유 레그 + 셋업별 건수/승률)."""
+        r = self.c_runner
+        lines = [f"Setup C: {r.describe()}"]
+        legs = r.open_legs_view()
+        if not legs:
+            lines.append("  보유 레그: 0개")
+        for leg in legs:
+            tp = (f" / TP1 {leg['tp1']:,.1f} / TP2 {leg['tp2']:,.1f}"
+                  if leg["tp1"] is not None else "")
+            lines.append(f"  · {leg['tag']} {leg['side']} @ {leg['entry_price']:,.1f} "
+                         f"(SL {leg['sl']:,.1f}{tp})")
+        s = r.summary()
+        for setup in ("C1", "C2"):
+            st = s.get(setup) or {}
+            if st.get("count"):
+                lines.append(f"  {setup}: {st['count']}건, 승률 {st['win_rate']*100:.0f}%, "
+                             f"평균 {st['avg_bps']:+.1f}bps")
+        return "\n".join(lines)
+
     def _pnl(self):
         s = self.runner.engine.summary()
         if not s:

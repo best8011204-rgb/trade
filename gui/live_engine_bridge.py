@@ -80,7 +80,7 @@ class LiveEngineRunner:
             state.apply_param_overrides(self.runner.engine)   # /set 값 복원
             self.runner.paused = bool(state.data.get("paused"))
             self._tg_bot = TelegramBot(self._cfg["telegram_bot_token"], state)
-            self._tg_handler = CommandHandler(self.runner, state, bus=self.bus)
+            self._tg_handler = CommandHandler(self.runner, state, bus=self.bus, c_runner=self.c_runner)
             self.runner.notify = self._tg_bot.send
 
         self._loop = None
