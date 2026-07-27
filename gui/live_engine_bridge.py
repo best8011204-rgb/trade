@@ -46,6 +46,7 @@ SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
 REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
 OI_DISPLAY_POLL_S = 60        # GUI 표시용 OI 폴링 주기 (엔진용 5분 폴링과 별개)
 CONDITIONS_POLL_S = 1         # 트리거 하위조건 체크리스트 갱신 주기 (실시간 표시용)
+REPLAY_LOOKBACK_S = 3600      # (재)시작 시 Setup A/B 감시 상태를 따라잡기 위해 재생할 과거 구간
 
 
 class LiveEngineRunner:
@@ -279,6 +280,18 @@ class LiveEngineRunner:
             self.bus.publish("status", {"running": False, "connected": False, "message": "정지됨"})
             return
 
+        # 1.5) 최근 REPLAY_LOOKBACK_S(기본 1시간) 재생: (재)시작 직전까지 이미 진행
+        # 중이었을 수 있는 박스 돌파/캐스케이드를 놓치지 않기 위해, 차트용이 아니라
+        # 실제 박스 계산 + Setup A/B 엔진 경로로 최근 1분봉+OI를 흘려보낸다.
+        try:
+            self._replay_recent_history()
+        except Exception as e:
+            print(f"[replay] 실패({e}) — 재생 없이 라이브 스트림부터 시작합니다.", file=sys.stderr)
+
+        if self._stopping.is_set():
+            self.bus.publish("status", {"running": False, "connected": False, "message": "정지됨"})
+            return
+
         # 2) 웹소켓 스트림: 자체 asyncio 루프 (+ 텔레그램 봇, 토큰 있을 때)
         tg_note = " · 텔레그램 ON" if self._tg_bot else ""
         ws_proxy = self._cfg.get("ws_proxy") or True
@@ -408,6 +421,59 @@ class LiveEngineRunner:
                 for k in raw if float(k[6]) <= now_ms  # closeTime 지난 봉만 = 확정봉
             ]
             self.bus.publish("candle_history", {"interval": interval, "candles": candles})
+
+    def _replay_recent_history(self):
+        """(재)시작 시점 이전 REPLAY_LOOKBACK_S(기본 1시간)의 1분봉+OI를 실제 박스
+        계산 + Setup A/B 엔진 경로로 재생한다 — _backfill_history()는 차트 표시만
+        갱신하고 엔진 상태는 건드리지 않으므로, 이게 없으면 봇이 막 시작한 순간
+        이미 진행 중이던 박스 돌파나 캐스케이드를 완전히 놓친 채로 IDLE부터
+        다시 시작한다.
+
+        self.runner.on_kline_msg/on_oi_poll(라이브 웹소켓 메시지가 쓰는 것과 동일한
+        진입점, 이미 _install_hooks()가 GUI 버스 발행까지 감싸둔 버전)을 그대로
+        재사용해, 박스/포지션/로그가 실제 라이브 흐름과 똑같이 갱신되게 한다.
+
+        CVD는 aggTrade 과거이력이 없어 재생 구간 동안 0으로 처리된다 — Setup A의
+        CVD 창이 60초라 라이브 스트림 시작 직후 곧바로 정상화된다. forceOrder도
+        과거이력이 없지만 Setup A/B/C 전부 forceOrder 불필요 설계라 무관하다.
+        """
+        now_ms = time.time() * 1000
+        start_ms = now_ms - REPLAY_LOOKBACK_S * 1000
+
+        raw_klines = bc.get_klines(self.symbol, interval="1m", start_ms=int(start_ms), end_ms=int(now_ms), limit=1500)
+        try:
+            raw_oi = bc.get_open_interest_hist(self.symbol, period="5m",
+                                                start_ms=int(start_ms), end_ms=int(now_ms), limit=500)
+        except Exception as e:
+            print(f"[replay] OI 이력 조회 실패({e}) — OI 없이 재생합니다.", file=sys.stderr)
+            raw_oi = []
+
+        events = []
+        for k in raw_klines:
+            if float(k[6]) > now_ms:
+                continue  # 미확정(진행 중) 봉 제외
+            events.append((k[0], 0, k))
+        for o in raw_oi:
+            events.append((float(o["timestamp"]), 1, o))
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        if not events:
+            return
+        print(f"[replay] 최근 {REPLAY_LOOKBACK_S // 60}분 캔들/OI {len(events)}건 재생 중...", file=sys.stderr)
+        for _, kind, payload in events:
+            if self._stopping.is_set():
+                return
+            if kind == 1:
+                self.runner.on_oi_poll(float(payload["sumOpenInterest"]), float(payload["timestamp"]) / 1000.0)
+            else:
+                k = payload
+                msg = {"k": {
+                    "s": self.symbol, "i": "1m", "x": True, "t": k[0],
+                    "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
+                }}
+                self.runner.on_kline_msg(msg)
+        print(f"[replay] 완료 — Setup A/B가 최근 {REPLAY_LOOKBACK_S // 60}분의 박스/캐스케이드 상태를 반영합니다.",
+              file=sys.stderr)
 
         # OI 히스토리 (5분 주기): 실패해도 라이브 폴링으로 채워지므로 치명적이지 않다
         try:
