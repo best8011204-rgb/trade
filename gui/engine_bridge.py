@@ -80,7 +80,7 @@ class EngineRunner:
             "message": f"합성 데이터 생성 중... ({self.symbol}, {self.days}일)",
         })
         try:
-            sim, baseline = generate(days=self.days, seed=self.seed)
+            sim, _baseline = generate(days=self.days, seed=self.seed)
         except Exception as e:
             self.bus.publish("status", {
                 "running": False, "connected": False,
@@ -113,11 +113,7 @@ class EngineRunner:
                     time.sleep(min(dt, MAX_SLEEP_S))
             prev_ts = ts
 
-            if kind == 0:  # ForceOrder
-                if obj.side == "SELL":
-                    engine.a.set_hourly_baseline(baseline)
-                engine.on_force_order(obj)
-            elif kind == 1:  # OIPoint
+            if kind == 1:  # OIPoint
                 latest_oi = obj.oi
                 engine.on_oi(obj)
                 self.bus.publish("oi", {"ts": obj.ts, "oi": obj.oi})
@@ -168,8 +164,6 @@ class EngineRunner:
 
     def _build_timeline(self, sim):
         events = []
-        for fo in sim.force_orders:
-            events.append((fo.ts, 0, fo))
         for pt in sim.oi_points:
             events.append((pt.ts, 1, pt))
         for i, c in enumerate(sim.candles):
