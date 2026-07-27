@@ -73,7 +73,8 @@ class CascadeExhaustionLong:
     """T1~T4 감지 + 포지션 관리 상태 머신. 스트리밍(캔들 1건씩) 입력, pandas 무사용
     (setup_a.py/setup_b.py의 기존 관례 유지 — setup_c.py만 DataFrame 배치 처리)."""
 
-    MIN_DIST_SAMPLES = 30  # 분위수 게이트가 유효하려면 최소 이만큼 표본이 쌓여야 한다
+    MIN_DIST_SAMPLES = 30    # 분위수 게이트가 유효하려면 최소 이만큼 표본이 쌓여야 한다
+    GATE_REFRESH_TICKS = 5   # 분위수 게이트 재계산 주기(틱=캔들 수)
 
     def __init__(self, params: CascadeAParams = None, macro_blackouts=None):
         self.p = params or CascadeAParams()
@@ -91,6 +92,14 @@ class CascadeExhaustionLong:
         self._oi_chg_dist = deque()        # (ts, oi_chg_now) — lookback_hours 유지, 분위수 게이트용
         self._rvol_dist = deque()          # (ts, rvol_now) — lookback_hours 유지, 분위수 게이트용
         self._last_oi_chg_for_decel = None  # OI 감속(2차미분) 판정용 직전 tick 값
+
+        # 분위수 게이트 캐시 — 매 틱(1분봉)마다 최대 lookback_hours*60개 값을 정렬하는
+        # 건 라이브(1분당 1회)엔 무해하지만 그리드서치/장기 백테스트에서 병목이 된다.
+        # 게이트가 나타내는 "최근 레짐"은 몇 분 지연돼도 사실상 동일하므로
+        # GATE_REFRESH_TICKS 틱마다만 재계산한다.
+        self._oi_gate = None
+        self._rvol_gate = None
+        self._gate_tick_count = 0
 
         self.state = "IDLE"                # IDLE -> CASCADE -> WATCH_EXHAUST -> ARMED
         self.cascade_start_ts = None
@@ -216,13 +225,18 @@ class CascadeExhaustionLong:
         while self._rvol_dist and c.ts - self._rvol_dist[0][0] > lookback_s:
             self._rvol_dist.popleft()
 
+        self._gate_tick_count += 1
+        if self._oi_gate is None or self._gate_tick_count % self.GATE_REFRESH_TICKS == 0:
+            self._oi_gate = self._quantile_gate(self._oi_chg_dist, p.oi_drop_quantile)
+            self._rvol_gate = self._quantile_gate(self._rvol_dist, p.rvol_quantile)
+
     # ---- 트리거 판정 ----------------------------------------------------
     def _check_t1(self, c: Candle):
         drop_atr, base_close = self._price_drop_atr(c.ts, c.close)
         oi_chg_now = self._oi_change_now(c.ts)
         rvol_now = self._rvol_now(c.volume)
-        oi_gate = self._quantile_gate(self._oi_chg_dist, self.p.oi_drop_quantile)
-        rvol_gate = self._quantile_gate(self._rvol_dist, self.p.rvol_quantile)
+        oi_gate = self._oi_gate
+        rvol_gate = self._rvol_gate
 
         if (drop_atr is not None and drop_atr >= self.p.price_drop_atr_mult
                 and oi_chg_now is not None and oi_gate is not None and oi_chg_now <= oi_gate
@@ -352,8 +366,8 @@ class CascadeExhaustionLong:
         drop_atr, _ = self._price_drop_atr(now_ts, now_close)
         oi_chg_now = self._oi_change_now(now_ts)
         rvol_now = self._rvol_now(self._vol_hist[-1]) if self._vol_hist else None
-        oi_gate = self._quantile_gate(self._oi_chg_dist, p.oi_drop_quantile)
-        rvol_gate = self._quantile_gate(self._rvol_dist, p.rvol_quantile)
+        oi_gate = self._oi_gate
+        rvol_gate = self._rvol_gate
 
         out.append({
             "key": "t1_drop", "label": f"T1: {p.cascade_window_s:.0f}초 하락 ≥ ATR×{p.price_drop_atr_mult:.1f}",
