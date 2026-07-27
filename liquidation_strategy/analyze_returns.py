@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
-from .setup_b import CascadeBParams
+from .setup_b import CascadeBParams, compute_box_series_from_feeds, compute_box_series_aggregated
 from .report import build_report, rejection_check_a, rejection_check_b
 
 DEFAULT_RISK_PCT = 0.5  # 트레이드당 계좌 위험(1R) = 0.5%
@@ -120,32 +120,28 @@ def load_oi_csv(path):
     return pts
 
 
-def build_box_series(candles, window_min=120):
-    """backfill.py 와 동일한 롤링 박스 — "이번 봉 이전까지"의 고가/저가로
-    계산한다(live_feed.py와 동일 원칙, close가 아니라 실제 윅 사용)."""
-    highs = [c.high for c in candles]
-    lows = [c.low for c in candles]
-    out = []
-    for i in range(len(candles)):
-        if i == 0:
-            out.append((candles[i].ts, lows[i], highs[i]))
-            continue
-        lo = max(0, i - window_min)
-        out.append((candles[i].ts, min(lows[lo:i]), max(highs[lo:i])))
-    return out
-
-
 # ----------------------------------------------------------------------
 # 리플레이: 진입(셋업 트리거) -> 청산(엔진) 실행
 # ----------------------------------------------------------------------
 def replay(candles, oi_points, a_params=None, b_params=None,
-           macro_blackouts=None, cost_bps=10.0):
+           macro_blackouts=None, cost_bps=10.0, daily_feed=None, five_min_feed=None):
     """candles+oi_points만으로 Setup A/B를 함께 구동한다 — Setup A가 forceOrder
-    없이 캔들+거래량+OI로 재설계된 이후 이 함수엔 forceOrder가 전혀 필요 없다."""
-    engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams(),
+    없이 캔들+거래량+OI로 재설계된 이후 이 함수엔 forceOrder가 전혀 필요 없다.
+
+    박스(계층형: 일봉 레짐 게이트 + 5분봉 실제 박스)는 live_feed.py와 완전히
+    동일한 로직(setup_b.HierarchicalBoxBuilder)으로 계산한다.
+    daily_feed/five_min_feed(backfill.fetch()가 REST로 독립 조회한 실제
+    상위 확정봉)가 주어지면 그대로 재생하고, 없으면(--source replay의 CSV처럼
+    1분봉만 있는 경우) 1분봉에서 집계해 재현한다."""
+    b_params = b_params or CascadeBParams()
+    engine = StrategyEngine(a_params or CascadeAParams(), b_params,
                             macro_blackouts, cost_bps=cost_bps)
 
-    box_by_ts = {b[0]: (b[1], b[2]) for b in build_box_series(candles)}
+    if daily_feed is not None and five_min_feed is not None:
+        box_series = compute_box_series_from_feeds(candles, daily_feed, five_min_feed, b_params)
+    else:
+        box_series = compute_box_series_aggregated(candles, b_params)
+    box_by_ts = {b[0]: (b[1], b[2]) for b in box_series}
 
     events = [(c.ts, 1, "candle", c) for c in candles]
     events += [(p.ts, 0, "oi", p) for p in oi_points]
@@ -159,9 +155,11 @@ def replay(candles, oi_points, a_params=None, b_params=None,
         else:
             if payload.cvd_delta:
                 engine.a.on_cvd_delta(ts_, payload.cvd_delta)
-            lo_hi = box_by_ts.get(payload.ts)
-            if lo_hi:
-                engine.set_box(lo_hi[0], lo_hi[1])
+            box_low, box_high = box_by_ts.get(payload.ts, (None, None))
+            if box_low is not None:
+                engine.set_box(box_low, box_high)
+            else:
+                engine.clear_box()
             engine.on_candle(payload, oi_now=latest_oi)
     return engine
 
@@ -249,8 +247,9 @@ def main():
         meta_src = "synthetic"
     elif args.source == "rest":
         from .backfill import fetch
-        candles, oi_points = fetch(args.days, args.symbol)
-        engine = replay(candles, oi_points, cost_bps=args.cost_bps)
+        candles, oi_points, daily_feed, five_min_feed = fetch(args.days, args.symbol)
+        engine = replay(candles, oi_points, cost_bps=args.cost_bps,
+                         daily_feed=daily_feed, five_min_feed=five_min_feed)
         meta_src = "binance_rest_real (Setup A/B 모두)"
     else:  # replay
         if not args.klines:

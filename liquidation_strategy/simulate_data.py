@@ -13,8 +13,10 @@
 import numpy as np
 from dataclasses import dataclass
 from .data_types import Candle, ForceOrder, OIPoint
+from .setup_b import CascadeBParams, compute_box_series_aggregated
 
-BOX_WINDOW_MIN = 120  # setup_b.CascadeBParams.box_window_min 기본값과 동일하게 유지
+BOX_WINDOW_MIN = 120  # 트랩 이벤트를 주입할 때 대략의 박스 위치를 잡기 위한 근사치일 뿐,
+                       # 실제 엔진에 공급되는 box_series는 아래에서 계층형 로직으로 다시 계산한다.
 
 
 @dataclass
@@ -27,7 +29,7 @@ class SimResult:
     events: list         # 주입된 이벤트 메타(정답 라벨), 디버그/검증용
 
 
-def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> SimResult:
+def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0, b_params=None) -> SimResult:
     rng = np.random.default_rng(seed)
     minutes = days * 24 * 60
     t0 = 1_750_000_000.0  # 임의 기준 epoch
@@ -205,17 +207,12 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
     oi_ts = t0 + np.arange(len(oi)) * 300.0
     oi_points = [OIPoint(ts=float(oi_ts[i]), oi=float(oi[i])) for i in range(len(oi))]
 
-    # 롤링 박스(BOX_WINDOW_MIN분) — "이번 봉 이전까지"의 고가/저가로 계산한다
-    # (live_feed.py와 동일 원칙: 이번 봉을 포함해서 계산하면 새 극값이 곧 박스
-    # 경계가 되어버려 그 봉 자신의 돌파를 절대 감지할 수 없다). close 대신
-    # 실제 윅(high/low)을 써야 라이브 박스 계산과 일치한다.
-    box_series = []
-    for i in range(minutes):
-        lo = max(0, i - BOX_WINDOW_MIN)
-        if i == 0:
-            box_series.append((float(ts[i]), float(lows[i]), float(highs[i])))
-        else:
-            box_series.append((float(ts[i]), float(np.min(lows[lo:i])), float(np.max(highs[lo:i]))))
+    # 계층형 박스(일봉 90일 레인지 압축 게이트 + 5분봉 120개[최근 12개 제외] 실제
+    # 박스) — live_feed.py/backfill.py와 완전히 동일한 로직(setup_b.
+    # HierarchicalBoxBuilder)으로 계산한다. 합성 데이터는 별도의 실제 상위
+    # 타임프레임 확정봉이 없으므로 1분봉에서 집계해 재현한다
+    # (compute_box_series_aggregated).
+    box_series = compute_box_series_aggregated(candles, b_params or CascadeBParams())
 
     events.sort(key=lambda e: e["start_ts"])
     return SimResult(candles, force_orders, oi_points, cvd_series, box_series, events), baseline_notional_per_hour

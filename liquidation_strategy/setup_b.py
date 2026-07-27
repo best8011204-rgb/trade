@@ -98,6 +98,121 @@ class DailyBoxRegime:
         return gate is not None and today_ratio <= gate
 
 
+class HierarchicalBoxBuilder:
+    """계층형 박스(일봉 레짐 게이트 + 5분봉 실제 박스) 상태 머신.
+
+    live_feed.py(라이브)와 백테스트/합성 경로(backfill.py, analyze_returns.py,
+    simulate_data.py) 전부 이 클래스 하나로 박스를 계산해야, 실거래와 백테스트가
+    "같은 로직"으로 박스를 판정한다고 말할 수 있다 — 서로 다른 코드로 중복
+    구현하면 아무리 조심해도 미묘하게 어긋나기 쉽다.
+    """
+
+    def __init__(self, params: CascadeBParams):
+        self.p = params
+        self.daily_regime = DailyBoxRegime()
+        maxlen = max(200, params.box_5m_bars + params.box_5m_exclude_recent + 20)
+        self.candles_5m = deque(maxlen=maxlen)
+        self.box_low = None
+        self.box_high = None
+
+    def on_daily_candle(self, ts: float, high: float, low: float, close: float):
+        self.daily_regime.on_daily_candle(ts, high, low, close)
+
+    def on_5m_candle(self, high: float, low: float):
+        self.candles_5m.append((high, low))
+        self._recompute()
+
+    def _recompute(self):
+        p = self.p
+        n = len(self.candles_5m)
+        end = n - p.box_5m_exclude_recent
+        start = end - p.box_5m_bars
+        if start < 0 or end <= start:
+            self.box_low = self.box_high = None
+            return
+        window = list(self.candles_5m)[start:end]
+        box_low = min(x[1] for x in window)
+        box_high = max(x[0] for x in window)
+        if self.daily_regime.is_range_regime(p):
+            self.box_low, self.box_high = box_low, box_high
+        else:
+            self.box_low = self.box_high = None
+
+
+def compute_box_series_from_feeds(candles_1m, daily_feed, five_min_feed, params: CascadeBParams):
+    """실제로 독립 조회한 상위 타임프레임 확정봉을 그대로 재생해 1분봉별 박스
+    상태를 계산한다 (backfill.py처럼 REST로 일봉/5분봉을 따로 받아올 수 있는
+    경우용 — live_feed.py가 실제 1d/5m 웹소켓 확정봉을 쓰는 것과 동일 원칙).
+
+    daily_feed/five_min_feed: [(open_ts, close_ts, high, low, close), ...],
+    close_ts 오름차순. 각 1분봉이 확정되는 시점(ts+60초)까지 이미 마감된
+    상위 확정봉만 반영해 인과적으로(미래 데이터 누설 없이) 계산한다.
+
+    반환: [(ts, box_low_or_None, box_high_or_None), ...] candles_1m과 동일 길이/순서.
+    """
+    builder = HierarchicalBoxBuilder(params)
+    d_idx = f_idx = 0
+    out = []
+    for c in candles_1m:
+        cutoff = c.ts + 60.0
+        while d_idx < len(daily_feed) and daily_feed[d_idx][1] <= cutoff:
+            open_ts, _close_ts, h, l, cl = daily_feed[d_idx]
+            builder.on_daily_candle(open_ts, h, l, cl)
+            d_idx += 1
+        while f_idx < len(five_min_feed) and five_min_feed[f_idx][1] <= cutoff:
+            _open_ts, _close_ts, h, l, _cl = five_min_feed[f_idx]
+            builder.on_5m_candle(h, l)
+            f_idx += 1
+        out.append((c.ts, builder.box_low, builder.box_high))
+    return out
+
+
+def compute_box_series_aggregated(candles_1m, params: CascadeBParams):
+    """상위 타임프레임(5분/일봉) 확정봉을 따로 받아올 수 없을 때(합성 데이터,
+    --source replay의 CSV 등 1분봉만 있는 경우), 주어진 1분봉을 집계해 같은
+    계층형 박스 로직을 인과적으로 재현한다. compute_box_series_from_feeds()와
+    박스 계산 로직 자체는 완전히 동일하고(HierarchicalBoxBuilder 공유),
+    상위 타임프레임 확정봉을 실제로 받는 대신 1분봉에서 즉석 집계한다는
+    점만 다르다.
+    """
+    builder = HierarchicalBoxBuilder(params)
+    DAY_S, FIVE_S = 86400.0, 300.0
+
+    daily_bucket = None
+    d_h = d_l = d_c = None
+    five_bucket = None
+    f_h = f_l = None
+
+    out = []
+    for c in candles_1m:
+        day_key = int(c.ts // DAY_S)
+        five_key = int(c.ts // FIVE_S)
+
+        if daily_bucket is not None and day_key != daily_bucket:
+            builder.on_daily_candle(daily_bucket * DAY_S, d_h, d_l, d_c)
+            d_h = d_l = d_c = None
+        if d_h is None:
+            daily_bucket = day_key
+            d_h, d_l, d_c = c.high, c.low, c.close
+        else:
+            d_h = max(d_h, c.high)
+            d_l = min(d_l, c.low)
+            d_c = c.close
+
+        if five_bucket is not None and five_key != five_bucket:
+            builder.on_5m_candle(f_h, f_l)
+            f_h = f_l = None
+        if f_h is None:
+            five_bucket = five_key
+            f_h, f_l = c.high, c.low
+        else:
+            f_h = max(f_h, c.high)
+            f_l = min(f_l, c.low)
+
+        out.append((c.ts, builder.box_low, builder.box_high))
+    return out
+
+
 class TrappedLongFlushShort:
     """T1~T3 감지 + 2트랜치 진입 관리 (양방향)."""
 

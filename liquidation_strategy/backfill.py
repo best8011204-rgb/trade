@@ -22,10 +22,13 @@ from . import binance_client as bc
 from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
-from .setup_b import CascadeBParams
+from .setup_b import CascadeBParams, compute_box_series_from_feeds
 from .report import build_report
 
 SYMBOL = "BTCUSDT"
+DAILY_LOOKBACK_DAYS = 150   # 일봉 레짐 게이트(90일 lookback + 14일 ATR 창 = 최소 104일 필요)
+                            # 위한 여유 — live_feed.py/gui/live_engine_bridge.py의 재생 범위와 동일
+FIVE_MIN_SEED_S = 150 * 300  # 5분봉 박스(120개+최근 12개 제외=132개 필요) 시딩용 여유(12.5시간)
 
 
 def fetch(days: int, symbol: str = SYMBOL):
@@ -33,7 +36,7 @@ def fetch(days: int, symbol: str = SYMBOL):
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - days * 86_400_000
 
-    print(f"[1/3] {symbol} 1분봉 {days}일 수집...", file=sys.stderr)
+    print(f"[1/4] {symbol} 1분봉 {days}일 수집...", file=sys.stderr)
     raw_klines = bc.get_klines_range(symbol, "1m", start_ms, end_ms)
     candles = [
         Candle(ts=k[0] / 1000.0, open=float(k[1]), high=float(k[2]),
@@ -41,42 +44,46 @@ def fetch(days: int, symbol: str = SYMBOL):
         for k in raw_klines
     ]
 
-    print(f"[2/3] {symbol} OI(5분) {days}일 수집...", file=sys.stderr)
+    print(f"[2/4] {symbol} OI(5분) {days}일 수집...", file=sys.stderr)
     raw_oi = bc.get_open_interest_hist_range(symbol, "5m", start_ms, end_ms)
     oi_points = [OIPoint(ts=o["timestamp"] / 1000.0, oi=float(o["sumOpenInterest"])) for o in raw_oi]
 
-    return candles, oi_points
+    # 계층형 박스(일봉 레짐 게이트 + 5분봉 실제 박스, setup_b.HierarchicalBoxBuilder와
+    # 동일 로직)를 라이브와 똑같이 계산하려면, klines/OI의 29일 한도와 무관하게
+    # 일봉/5분봉을 독립적으로 더 길게 받아와야 한다(live_feed.py가 실제 웹소켓
+    # 1d/5m 확정봉을 그대로 쓰는 것과 동일 원칙 — gui/live_engine_bridge.py의
+    # 재생 로직도 동일하게 별도로 일봉/5분봉을 REST로 받아온다).
+    print(f"[3/4] {symbol} 일봉 {DAILY_LOOKBACK_DAYS}일(레인지 게이트용) 수집...", file=sys.stderr)
+    daily_start_ms = end_ms - DAILY_LOOKBACK_DAYS * 86_400_000
+    raw_daily = bc.get_klines(symbol, interval="1d", start_ms=int(daily_start_ms), end_ms=end_ms, limit=1500)
+    daily_feed = [
+        (k[0] / 1000.0, k[6] / 1000.0, float(k[2]), float(k[3]), float(k[4]))
+        for k in raw_daily
+    ]
 
+    print(f"[4/4] {symbol} 5분봉(박스용, {days}일+{FIVE_MIN_SEED_S//3600}시간) 수집...", file=sys.stderr)
+    five_start_ms = start_ms - FIVE_MIN_SEED_S * 1000
+    raw_5m = bc.get_klines_range(symbol, "5m", int(five_start_ms), end_ms)
+    five_min_feed = [
+        (k[0] / 1000.0, k[6] / 1000.0, float(k[2]), float(k[3]), float(k[4]))
+        for k in raw_5m
+    ]
 
-def build_box_series(candles, window_min=120):
-    """"이번 봉 이전까지"의 고가/저가로 박스를 계산한다(live_feed.py와 동일 원칙).
-    이번 봉을 포함해서 계산하면 그 봉이 만든 새 극값이 곧 박스 경계가 되어버려
-    그 봉 자신의 돌파를 절대 감지할 수 없다. close가 아니라 실제 윅(high/low)을
-    써야 라이브 박스 계산과 일치한다."""
-    highs = [c.high for c in candles]
-    lows = [c.low for c in candles]
-    box_series = []
-    for i in range(len(candles)):
-        if i == 0:
-            box_series.append((candles[i].ts, lows[i], highs[i]))
-            continue
-        lo_win = max(0, i - window_min)
-        box_series.append((candles[i].ts, min(lows[lo_win:i]), max(highs[lo_win:i])))
-    return box_series
+    return candles, oi_points, daily_feed, five_min_feed
 
 
 def run(days: int, symbol: str = SYMBOL, a_params=None, b_params=None,
         out_path="liquidation_strategy_output_real_b.json"):
-    candles, oi_points = fetch(days, symbol)
+    candles, oi_points, daily_feed, five_min_feed = fetch(days, symbol)
     if not candles:
         raise RuntimeError("klines 수집 실패 — 네트워크/레이트리밋 확인")
 
-    print("[3/3] Setup A+B 백테스트 실행...", file=sys.stderr)
-    engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams())
+    print("백테스트 실행...", file=sys.stderr)
+    b_params = b_params or CascadeBParams()
+    engine = StrategyEngine(a_params or CascadeAParams(), b_params)
 
-    box_series = build_box_series(candles)
+    box_series = compute_box_series_from_feeds(candles, daily_feed, five_min_feed, b_params)
     box_by_ts = {b[0]: (b[1], b[2]) for b in box_series}
-    oi_by_ts = {o.ts: o.oi for o in oi_points}
     oi_sorted = sorted(oi_points, key=lambda o: o.ts)
 
     oi_idx = 0
@@ -86,9 +93,11 @@ def run(days: int, symbol: str = SYMBOL, a_params=None, b_params=None,
             latest_oi = oi_sorted[oi_idx].oi
             engine.on_oi(oi_sorted[oi_idx])
             oi_idx += 1
-        lo_hi = box_by_ts.get(c.ts)
-        if lo_hi:
-            engine.set_box(lo_hi[0], lo_hi[1])
+        box_low, box_high = box_by_ts.get(c.ts, (None, None))
+        if box_low is not None:
+            engine.set_box(box_low, box_high)
+        else:
+            engine.clear_box()
         engine.on_candle(c, oi_now=latest_oi)
 
     meta = {

@@ -38,7 +38,7 @@ from . import binance_client as bc
 from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
-from .setup_b import CascadeBParams, DailyBoxRegime
+from .setup_b import CascadeBParams, HierarchicalBoxBuilder
 from .report import build_report
 
 STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
@@ -62,8 +62,9 @@ class LiveShadowRunner:
         # 계층형 박스: 5분봉 120개(최근 12개 제외)로 실제 box_low/high를 뽑고,
         # 일봉 90일 레인지 압축 게이트가 "돌파 구간"이라 판단하면 박스 자체를
         # 없앤다(clear_box) — Setup B 신규 트리거 탐지가 자동으로 멈춘다.
-        self.candles_5m = deque(maxlen=200)
-        self.daily_regime = DailyBoxRegime()
+        # (backfill.py/simulate_data.py 등 백테스트 경로와 완전히 동일한 로직을
+        # 공유하기 위해 HierarchicalBoxBuilder 하나로 계산한다.)
+        self.box_builder = HierarchicalBoxBuilder(self.engine.b.p)
         self.cvd_accum = 0.0
         self._n_closed_seen = 0
         self._a_log_seen = 0
@@ -122,12 +123,15 @@ class LiveShadowRunner:
             "closed": closed,
         }
         if interval == "1d" and closed:
-            self.daily_regime.on_daily_candle(candle_dict["ts"], candle_dict["high"],
-                                               candle_dict["low"], candle_dict["close"])
+            self.box_builder.on_daily_candle(candle_dict["ts"], candle_dict["high"],
+                                              candle_dict["low"], candle_dict["close"])
 
         if interval == "5m" and closed:
-            self.candles_5m.append(candle_dict)
-            self._update_5m_box()
+            self.box_builder.on_5m_candle(candle_dict["high"], candle_dict["low"])
+            if self.box_builder.box_low is not None:
+                self.engine.set_box(self.box_builder.box_low, self.box_builder.box_high)
+            else:
+                self.engine.clear_box()
 
         if interval == "1m" and closed:
             c = Candle(ts=candle_dict["ts"], open=candle_dict["open"], high=candle_dict["high"],
@@ -146,27 +150,6 @@ class LiveShadowRunner:
                 self.on_display_candle(interval, candle_dict)
             except Exception as e:  # 표시 훅 오류가 엔진을 죽이면 안 된다
                 print(f"[display_hook] error: {e}", file=sys.stderr)
-
-    def _update_5m_box(self):
-        """실제 박스(box_low/high)는 5분봉 120개 중 최근 12개를 뺀
-        120~13번째 구간(과거 확정 구간)으로만 계산한다. 일봉 90일 레인지
-        압축 게이트(daily_regime)가 "돌파 구간"이라 판단하면 박스 자체가
-        존재하지 않는 것으로 취급한다(clear_box) — 새 구간이 형성되지 않은
-        상태이므로 Setup B의 신규 트리거 탐지를 자동으로 멈춘다."""
-        p = self.engine.b.p
-        n = len(self.candles_5m)
-        end = n - p.box_5m_exclude_recent
-        start = end - p.box_5m_bars
-        if start < 0 or end <= start:
-            self.engine.clear_box()
-            return
-        window = list(self.candles_5m)[start:end]
-        box_low = min(x["low"] for x in window)
-        box_high = max(x["high"] for x in window)
-        if self.daily_regime.is_range_regime(p):
-            self.engine.set_box(box_low, box_high)
-        else:
-            self.engine.clear_box()
 
     _latest_oi = None
 

@@ -80,7 +80,7 @@ class EngineRunner:
             "message": f"합성 데이터 생성 중... ({self.symbol}, {self.days}일)",
         })
         try:
-            sim, _baseline = generate(days=self.days, seed=self.seed)
+            sim, _baseline = generate(days=self.days, seed=self.seed, b_params=self.b_params)
         except Exception as e:
             self.bus.publish("status", {
                 "running": False, "connected": False,
@@ -120,7 +120,10 @@ class EngineRunner:
             else:  # Candle
                 c, (_box_ts, box_low, box_high) = obj
                 engine.a.on_cvd_delta(c.ts, c.cvd_delta)
-                engine.set_box(box_low, box_high)
+                if box_low is not None:
+                    engine.set_box(box_low, box_high)
+                else:
+                    engine.clear_box()
                 engine.on_candle(c, oi_now=latest_oi)
                 self._c_agg.add_1m(c.ts, c.open, c.high, c.low, c.close, c.volume)
                 candle_count += 1

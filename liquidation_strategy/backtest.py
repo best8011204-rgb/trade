@@ -36,9 +36,11 @@ def run_backtest(sim, baseline_notional_per_hour, a_params: CascadeAParams = Non
         elif kind == "cvd":
             engine.a.on_cvd_delta(ts_, payload)
         elif kind == "candle":
-            lo_hi = box_by_ts.get(ts_)
-            if lo_hi:
-                engine.set_box(lo_hi[0], lo_hi[1])
+            box_low, box_high = box_by_ts.get(ts_, (None, None))
+            if box_low is not None:
+                engine.set_box(box_low, box_high)
+            else:
+                engine.clear_box()
             engine.on_candle(payload, oi_now=latest_oi)
 
     return engine
