@@ -11,6 +11,12 @@ REST로 과거 일봉/5분봉/1분봉/OI를 재생해 계층형 박스(일봉 �
 웹소켓이 확정봉을 놓쳐도 1분마다 REST로 보정하는 폴백도 GUI 경로와 동일하게
 동작한다.
 
+[Setup A 예외] run_all.py(로컬 GUI, 한국 리전 — forceOrder 지역 차단 추정)와
+달리, 여기서는 Setup A가 setup_a_legacy.py의 forceOrder(청산 틱) 기반 원본
+구현을 쓴다 — run_bot.py가 실제로 돌아가는 VPS에서는 forceOrder가 정상
+수신될 수 있어서다. 캔들+거래량+OI만 쓰는 setup_a.py 버전은 run_all.py
+전용이며, 두 경로의 Setup A 트리거 조건/파라미터가 서로 다르다는 뜻이다.
+
 GUI까지 같이 보려면 이 파일 대신 `python3 run_all.py` 를 실행하면 된다 —
 run_all 이 GUI + 전략 엔진 + 텔레그램 봇을 한 프로세스에서 모두 구동한다.
 run_bot.py 는 화면 없는 서버/장시간 무인 운영용 대안이다.
@@ -35,6 +41,7 @@ from liquidation_strategy.live_trade import LiveTradingRunner
 from liquidation_strategy.telegram_bot import TelegramBot, BotState, CommandHandler
 from liquidation_strategy.setup_c import ParamsC
 from liquidation_strategy.live_setup_c import LiveSetupCRunner
+from liquidation_strategy.setup_a_legacy import LegacyCascadeAParams, LegacyCascadeExhaustionLong
 
 
 async def main_async(cfg):
@@ -55,9 +62,17 @@ async def main_async(cfg):
     else:
         print("[telegram] 토큰 없음 — 텔레그램 기능 비활성", file=sys.stderr)
 
+    # Setup A: run_all.py(로컬 GUI, 한국 리전 — forceOrder 지역 차단 추정)는
+    # setup_a.py의 재설계된(캔들+거래량+OI, forceOrder 불필요) 버전을 그대로
+    # 쓰지만, run_bot.py는 실제로 forceOrder가 정상 수신될 가능성이 있는
+    # VPS에서 돌아가므로 원래(재설계 전) forceOrder 기반 구현을 되살려 쓴다 —
+    # a_impl로 주입하면 engine.py가 이 구현을 그대로 Setup A 자리에 꽂는다.
+    a_impl = LegacyCascadeExhaustionLong(LegacyCascadeAParams())
+
     runner = LiveTradingRunner(
         symbol=cfg["symbol"], out_json=cfg["out_json"], log_dir=cfg["log_dir"],
         trader=None, trade_usdt=float(cfg["trade_usdt"]), notify=notify,
+        a_impl=a_impl,
     )
     state.apply_param_overrides(runner.engine)
     runner.paused = bool(state.data.get("paused"))

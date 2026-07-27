@@ -35,7 +35,7 @@ from collections import deque
 import websockets
 
 from . import binance_client as bc
-from .data_types import Candle, OIPoint
+from .data_types import Candle, OIPoint, ForceOrder
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams, HierarchicalBoxBuilder
@@ -56,13 +56,13 @@ REPLAY_DAILY_DAYS = 150       # 일봉 레인지 게이트(90일 lookback+14일 
 
 class LiveShadowRunner:
     def __init__(self, symbol=SYMBOL, out_json="liquidation_strategy_output_live.json",
-                 log_dir="logs", a_params=None, b_params=None):
+                 log_dir="logs", a_params=None, b_params=None, a_impl=None):
         self.symbol = symbol
         self.out_json = out_json
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
 
-        self.engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams())
+        self.engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams(), a_impl=a_impl)
         self.candles = deque(maxlen=CANDLE_HISTORY_MAX)
         # 계층형 박스: 5분봉 120개(최근 12개 제외)로 실제 box_low/high를 뽑고,
         # 일봉 90일 레인지 압축 게이트가 "돌파 구간"이라 판단하면 박스 자체를
@@ -90,13 +90,18 @@ class LiveShadowRunner:
 
     # ---- inbound events ----------------------------------------------
     def on_force_order_msg(self, data):
-        """청산 원시 이벤트를 감사·기록용으로만 남긴다(logs/raw_events.jsonl) —
-        Setup A/B/C 전부 forceOrder 없이 캔들+거래량+OI만으로 동작하므로,
-        이 스트림이 아예 안 들어와도(지역 차단 등) 트레이딩 로직엔 영향이 없다."""
+        """청산 원시 이벤트를 감사·기록용으로 남기고(logs/raw_events.jsonl),
+        엔진에도 전달한다. 기본 Setup A(setup_a.py)는 forceOrder 없이 캔들+
+        거래량+OI만으로 동작하므로 이 스트림이 안 들어와도(지역 차단 등)
+        영향이 없다 — engine.on_force_order()가 self.a에 on_force_order가
+        없으면 조용히 무시한다. run_bot.py가 setup_a_legacy(forceOrder 기반)를
+        a_impl로 주입한 경우에만 실제로 쓰인다."""
         o = data["o"]
         if o["s"] != self.symbol.upper():
             return
         self._append_jsonl(self.event_log_path, {"type": "forceOrder", **data})
+        fo = ForceOrder(ts=o["T"] / 1000.0, side=o["S"], price=float(o["ap"] or o["p"]), qty=float(o["q"]))
+        self.engine.on_force_order(fo)
 
     def on_agg_trade_msg(self, data):
         if data["s"] != self.symbol.upper():

@@ -9,7 +9,7 @@ pending_signal["side"]로 알려주고, 이 파일은 그 값을 그대로 Trade
 """
 
 from dataclasses import dataclass, field
-from .data_types import Trade, Side, Candle, OIPoint
+from .data_types import Trade, Side, Candle, OIPoint, ForceOrder
 from .setup_a import CascadeExhaustionLong, CascadeAParams
 from .setup_b import TrappedLongFlushShort, CascadeBParams
 
@@ -33,8 +33,13 @@ class StrategyEngine:
         b_params: CascadeBParams = None,
         macro_blackouts=None,
         cost_bps: float = ROUNDTRIP_COST_BPS,
+        a_impl=None,
     ):
-        self.a = CascadeExhaustionLong(a_params, macro_blackouts)
+        # a_impl: Setup A 구현을 통째로 교체하고 싶을 때 쓴다(예: run_bot.py가
+        # forceOrder 기반 setup_a_legacy.LegacyCascadeExhaustionLong을 주입).
+        # 지정하지 않으면 기존과 동일하게 setup_a.py의 재설계된(forceOrder
+        # 불필요) 버전을 쓴다 — run_all.py는 항상 이 기본 경로를 쓴다.
+        self.a = a_impl if a_impl is not None else CascadeExhaustionLong(a_params, macro_blackouts)
         self.b = TrappedLongFlushShort(b_params)
         self.cost_bps = cost_bps
 
@@ -73,6 +78,22 @@ class StrategyEngine:
     def on_oi(self, pt: OIPoint):
         if self.b_enabled:
             self.b.on_oi(pt)
+
+    def on_force_order(self, fo: ForceOrder):
+        """forceOrder(청산 틱) 이벤트 — 기본 Setup A(setup_a.py, 캔들+OI 기반)는
+        이 메서드를 쓰지 않는다(hasattr 가드로 조용히 무시). run_bot.py가
+        setup_a_legacy.LegacyCascadeExhaustionLong을 a_impl로 주입했을 때만
+        의미가 있다."""
+        if not self.a_enabled or not hasattr(self.a, "on_force_order"):
+            return
+        was_idle = self.a.state == "IDLE"
+        self.a.on_force_order(fo)
+        # A 트리거(T1)가 새로 발생 && B 포지션 보유 중이면 B의 TP2를 동적 전환
+        if was_idle and self.a.state == "CASCADE" and self._has_setup("B"):
+            for leg in self.open_legs:
+                if leg.trade.setup == "B":
+                    leg.tp2 = fo.price  # 청산 캐스케이드 발생 지점을 TP2로 재설정
+                    self.b.log.append((fo.ts, f"A트리거 발생 -> B TP2를 {fo.price:.1f}로 동적 전환"))
 
     def on_candle(self, c: Candle, oi_now: float = None):
         self._manage_open_legs(c)
@@ -134,7 +155,11 @@ class StrategyEngine:
     def _open_a(self, sig, c):
         p = self.a.p
         side = Side.LONG if sig["side"] == "long" else Side.SHORT
-        sl, tp1, tp2 = CascadeExhaustionLong.compute_exits(
+        # type(self.a) — a_impl로 다른 Setup A 구현(예: setup_a_legacy)이 주입된
+        # 경우에도 그 구현의 compute_exits가 불리도록 다형 호출한다(하드코딩된
+        # CascadeExhaustionLong.compute_exits였다면 a_impl이 무엇이든 항상 기본
+        # 구현의 산식이 쓰여 잘못된 SL/TP가 나왔을 것이다).
+        sl, tp1, tp2 = type(self.a).compute_exits(
             sig["price"], sig["cascade_extreme"], sig["cascade_start_price"], p, side=sig["side"]
         )
         trade = Trade(
