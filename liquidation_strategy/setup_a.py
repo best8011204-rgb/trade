@@ -321,8 +321,11 @@ class CascadeExhaustionLong:
         self.pending_signal = None
         return sig
 
-    def describe(self):
+    def describe(self, current_price: float = None):
         """현재 상태를 사람이 읽을 텍스트로 설명 (GUI/텔레그램 표시용).
+
+        current_price: 제공하면(체결 틱 기반 실시간가) 확정봉 사이에도 하락률
+        표시가 라이브로 갱신된다. 없으면 마지막 확정봉 기준(최대 1분 지연).
 
         반환: (설명 텍스트, 참고 가격 또는 None). 참고 가격은 차트에
         점선으로 그릴 때 쓰는 '지금 전략이 주시 중인 레벨'이다.
@@ -336,13 +339,14 @@ class CascadeExhaustionLong:
                 None,
             )
         if self.state == "CASCADE":
+            effective_low = min(self.cascade_low, current_price) if current_price is not None else self.cascade_low
             move_pct = 0.0
             if self.cascade_start_price:
-                move_pct = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price * 100
+                move_pct = (self.cascade_start_price - effective_low) / self.cascade_start_price * 100
             return (
-                f"캐스케이드 진행 중(#{self.cascade_id}) — 저점 {self.cascade_low:,.1f} "
+                f"캐스케이드 진행 중(#{self.cascade_id}) — 저점 {effective_low:,.1f} "
                 f"(시작가 대비 -{move_pct:.2f}%). -{p.min_move_pct*100:.2f}% 하락 확인되면 소진 관찰 시작",
-                self.cascade_low,
+                effective_low,
             )
         if self.state == "WATCH_EXHAUST":
             return (
@@ -354,15 +358,21 @@ class CascadeExhaustionLong:
             return "진입 신호 발생 — 체결 대기 중", self.cascade_low
         return self.state, None
 
-    def conditions(self, now_ts: float):
-        """T1~T4 하위 조건 각각의 실시간 충족 여부 (GUI 체크리스트 표시용).
+    def conditions(self, now_ts: float, current_price: float = None):
+        """T1~T4 하위 조건 각각의 실시간 충족 여부 (GUI/텔레그램 체크리스트 표시용).
+
+        current_price: 제공하면(체결 틱 기반 실시간가) T1 하락폭/T2 하락률이
+        확정봉 사이에도 매초 라이브로 갱신된다 — 없으면 마지막 확정봉 종가 기준
+        (최대 1분 지연). RVOL/OI는 그 자체가 1분/5분 단위 데이터라 틱 단위로
+        더 세분화할 수 없어 항상 마지막 확정치를 쓴다.
 
         상태 단계와 무관하게 항상 전부 계산한다. 반환: [{"key","label","met","detail"}, ...] (8개 고정).
         """
         p = self.p
         out = []
 
-        now_close = self._prev_close if self._prev_close is not None else 0.0
+        now_close = current_price if current_price is not None else (
+            self._prev_close if self._prev_close is not None else 0.0)
         drop_atr, _ = self._price_drop_atr(now_ts, now_close)
         oi_chg_now = self._oi_change_now(now_ts)
         rvol_now = self._rvol_now(self._vol_hist[-1]) if self._vol_hist else None
@@ -385,8 +395,11 @@ class CascadeExhaustionLong:
             "detail": f"{rvol_now:.2f}" if rvol_now is not None else "N/A",
         })
 
-        if self.cascade_start_price and self.cascade_low is not None:
-            move_pct = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price
+        effective_low = self.cascade_low
+        if current_price is not None and self.cascade_low is not None:
+            effective_low = min(self.cascade_low, current_price)
+        if self.cascade_start_price and effective_low is not None:
+            move_pct = (self.cascade_start_price - effective_low) / self.cascade_start_price
         else:
             move_pct = 0.0
         out.append({
