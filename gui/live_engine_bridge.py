@@ -83,6 +83,7 @@ class LiveEngineRunner:
                 state.data["chat_id"] = int(self._cfg["telegram_chat_id"])
             state.apply_param_overrides(self.runner.engine, self.c_runner)   # /set 값 복원
             self.runner.paused = bool(state.data.get("paused"))
+            self.c_runner.enabled = not self.runner.paused  # /pause·/resume 상태를 Setup C에도 동일하게 복원
             self._tg_bot = TelegramBot(self._cfg["telegram_bot_token"], state)
             self._tg_handler = CommandHandler(
                 self.runner, state, bus=self.bus, c_runner=self.c_runner,

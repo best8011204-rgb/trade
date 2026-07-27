@@ -231,7 +231,15 @@ class CommandHandler:
             if cmd == "/pnl":
                 return self._pnl()
             if cmd == "/trades":
-                n = int(args[0]) if args else 5
+                if args:
+                    try:
+                        n = int(args[0])
+                    except ValueError:
+                        return f"'{args[0]}' 은(는) 숫자가 아닙니다. 사용법: /trades [n]"
+                    if n <= 0:
+                        return "n은 1 이상이어야 합니다."
+                else:
+                    n = 5
                 return self._trades(n)
             if cmd == "/params":
                 return self._params()
@@ -241,12 +249,16 @@ class CommandHandler:
                 return self._set_bulk(cmd[-1], args)
             if cmd == "/pause":
                 self.runner.paused = True
+                if self.c_runner is not None:
+                    self.c_runner.enabled = False  # 신규 진입만 멈춤 — stop()과 달리 보유 포지션은 그대로 관리됨
                 self.state.data["paused"] = True
                 self.state.save()
                 self._log("신규 진입 일시정지 (/pause)")
                 return "⏸ 신규 진입을 중지했습니다. (/resume 으로 재개)"
             if cmd == "/resume":
                 self.runner.paused = False
+                if self.c_runner is not None:
+                    self.c_runner.enabled = True
                 self.state.data["paused"] = False
                 self.state.save()
                 self._log("신규 진입 재개 (/resume)")
@@ -254,6 +266,8 @@ class CommandHandler:
             if cmd == "/close":
                 if args and args[0].lower() == "all":
                     self.runner.manual_close_all()
+                    if self.c_runner is not None:
+                        self.c_runner.manual_close_all(self.runner.last_price)
                     self._log("포지션 전량 청산 요청 (/close all)")
                     return "✅ 전량 청산 주문을 보냈습니다. /status 로 확인하세요."
                 return "사용법: /close all"

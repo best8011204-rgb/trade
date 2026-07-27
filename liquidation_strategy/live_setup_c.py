@@ -10,6 +10,7 @@ oi_poll_loop(5분 REST)의 OI 값을 받는다(신규 on_oi 훅).
 
 from __future__ import annotations
 
+import time
 from collections import deque
 
 import pandas as pd
@@ -18,7 +19,7 @@ from .setup_c import (
     ParamsC, compute_features, advance_c1, advance_c2, C1State, C2State,
     conditions_c1, conditions_c2, conditions_c1_live, conditions_c2_live,
 )
-from .backtest_c import Ledger
+from .backtest_c import Ledger, _bps, _r_multiple
 
 MAX_BARS_KEPT = 3000   # quantile_lookback_bars(기본 2016) + 여유
 
@@ -163,6 +164,32 @@ class LiveSetupCRunner:
         self.ledger_c1 = Ledger("C1")
         self.ledger_c2 = Ledger("C2")
         self.enabled = True
+
+    def manual_close_all(self, price: float = None, ts: float = None):
+        """텔레그램 /close all — 보유 중인 C1/C2 포지션을 현재가로 강제 청산
+        기록한다(가상 체결, 실주문 없음 — Setup A/B의 manual_close_all과 동일
+        원칙: price가 없으면(아직 체결틱 미수신) 포지션 자신의 진입가로
+        대체한다). 정상 스트림 처리(_record_closed)는 pandas Timestamp(캔들
+        인덱스)를 받아 .timestamp()를 호출하는데, 여기서는 이미 epoch float인
+        time.time()을 exit_ts로 쓰므로 별도로 최종 dict를 직접 만든다."""
+        ts = ts if ts is not None else time.time()
+        for setup, ledger in (("C1", self.ledger_c1), ("C2", self.ledger_c2)):
+            pos = ledger.pos
+            if pos is None:
+                continue
+            exit_price = price if price is not None else pos["entry"]
+            bps = _bps(pos["entry"], exit_price, pos["side"])
+            r_mult = _r_multiple(pos["entry"], pos["stop"], exit_price, pos["side"])
+            rec = {
+                "setup": setup, "side": pos["side"].upper(),
+                "entry_ts": pos["entry_ts"].timestamp(), "entry_price": pos["entry"],
+                "exit_ts": ts, "exit_price": exit_price, "reason": "MANUAL",
+                "bars_held": pos["bars_held"], "bps": bps, "r_multiple": r_mult,
+                "tag": f"{setup}-{pos['side']}",
+            }
+            self.closed_trades.append(rec)
+            self.log.append((ts, f"Setup {setup} {rec['side']} MANUAL 청산 @ {exit_price:,.1f} ({bps:+.1f}bps)"))
+            ledger.pos = None
 
     def open_legs_view(self) -> list[dict]:
         out = []

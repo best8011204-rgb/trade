@@ -90,6 +90,7 @@ async def main_async(cfg):
 
     state.apply_param_overrides(runner.engine, c_runner)
     runner.paused = bool(state.data.get("paused"))
+    c_runner.enabled = not runner.paused  # /pause·/resume 상태를 Setup C에도 동일하게 복원
 
     def on_display_candle(interval, candle):
         if interval == "5m" and candle.get("closed"):
