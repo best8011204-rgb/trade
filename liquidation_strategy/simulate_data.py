@@ -203,11 +203,17 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
     oi_ts = t0 + np.arange(len(oi)) * 300.0
     oi_points = [OIPoint(ts=float(oi_ts[i]), oi=float(oi[i])) for i in range(len(oi))]
 
-    # 4h 롤링 박스 (240분)
+    # 4h 롤링 박스 (240분) — "이번 봉 이전까지"의 고가/저가로 계산한다(live_feed.py와
+    # 동일 원칙: 이번 봉을 포함해서 계산하면 새 극값이 곧 박스 경계가 되어버려
+    # 그 봉 자신의 돌파를 절대 감지할 수 없다). close 대신 실제 윅(high/low)을
+    # 써야 라이브 박스 계산과 일치한다 — close만 쓰면 wick 돌파를 놓친다.
     box_series = []
     for i in range(minutes):
         lo = max(0, i - 240)
-        box_series.append((float(ts[i]), float(np.min(price[lo:i + 1])), float(np.max(price[lo:i + 1]))))
+        if i == 0:
+            box_series.append((float(ts[i]), float(lows[i]), float(highs[i])))
+        else:
+            box_series.append((float(ts[i]), float(np.min(lows[lo:i])), float(np.max(highs[lo:i]))))
 
     events.sort(key=lambda e: e["start_ts"])
     return SimResult(candles, force_orders, oi_points, cvd_series, box_series, events), baseline_notional_per_hour
