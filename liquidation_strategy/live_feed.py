@@ -1,9 +1,11 @@
 """실시간 Binance 선물 스트림 -> StrategyEngine -> 섀도(가상 체결) 로깅.
 
 명세서 5장 1단계("섀도 단계: 라이브 스트림에서 시그널만 기록, 가상 체결")를
-그대로 구현한다. 실제 주문을 내지 않는다 — forceOrder/aggTrade/kline
-웹소켓과 openInterest REST 폴링을 엔진에 연결해 트리거·체결을 계산만 하고
-JSONL로 기록한다.
+그대로 구현한다. 실제 주문을 내지 않는다 — aggTrade/kline 웹소켓과
+openInterest REST 폴링을 엔진에 연결해 트리거·체결을 계산만 하고 JSONL로
+기록한다. forceOrder(청산 틱)는 감사용으로만 기록한다 — Setup A/B/C 전부
+캔들+거래량+OI만으로 동작하므로 이 스트림이 안 들어와도 트레이딩 로직엔
+영향이 없다(setup_a.py 재설계 참고).
 
 [v2 변경점]
 - kline 구독을 1m 단일에서 KLINE_INTERVALS = (1m, 5m, 1h, 1d) 멀티로 확장.
@@ -33,7 +35,7 @@ from collections import deque
 import websockets
 
 from . import binance_client as bc
-from .data_types import ForceOrder, Candle, OIPoint
+from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams
@@ -43,34 +45,9 @@ STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
 SYMBOL = "btcusdt"
 KLINE_INTERVALS = ("1m", "5m", "1h", "1d")   # 1m=엔진+차트, 나머지=차트 전용
 BOX_WINDOW_MIN = 240        # 4h 박스
-BASELINE_WINDOW_S = 24 * 3600
 OI_POLL_S = 300              # 5분
 SNAPSHOT_EVERY_S = 60
 CANDLE_HISTORY_MAX = 3000    # 대시보드용으로 보관할 최근 분봉 수
-
-
-class RollingBaseline:
-    """T1 임계값 비교용 '최근 24h 시간당 평균 청산 금액'을 라이브로 추정."""
-
-    def __init__(self, window_s=BASELINE_WINDOW_S):
-        self.window_s = window_s
-        self.buf = deque()  # (ts, notional)
-
-    def add(self, ts, notional):
-        self.buf.append((ts, notional))
-        self._prune(ts)
-
-    def _prune(self, ts):
-        while self.buf and ts - self.buf[0][0] > self.window_s:
-            self.buf.popleft()
-
-    def per_hour(self, ts):
-        self._prune(ts)
-        if not self.buf:
-            return None
-        span_h = max(1.0, (ts - self.buf[0][0]) / 3600.0)
-        total = sum(n for _, n in self.buf)
-        return total / span_h
 
 
 class LiveShadowRunner:
@@ -82,7 +59,6 @@ class LiveShadowRunner:
         os.makedirs(log_dir, exist_ok=True)
 
         self.engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams())
-        self.baseline = RollingBaseline()
         self.candles = deque(maxlen=CANDLE_HISTORY_MAX)
         self.cvd_accum = 0.0
         self._n_closed_seen = 0
@@ -104,16 +80,13 @@ class LiveShadowRunner:
 
     # ---- inbound events ----------------------------------------------
     def on_force_order_msg(self, data):
+        """청산 원시 이벤트를 감사·기록용으로만 남긴다(logs/raw_events.jsonl) —
+        Setup A/B/C 전부 forceOrder 없이 캔들+거래량+OI만으로 동작하므로,
+        이 스트림이 아예 안 들어와도(지역 차단 등) 트레이딩 로직엔 영향이 없다."""
         o = data["o"]
         if o["s"] != self.symbol.upper():
             return
-        fo = ForceOrder(ts=o["T"] / 1000.0, side=o["S"], price=float(o["ap"] or o["p"]), qty=float(o["q"]))
         self._append_jsonl(self.event_log_path, {"type": "forceOrder", **data})
-        if fo.side == "SELL":
-            self.baseline.add(fo.ts, fo.notional)
-            self.engine.a.set_hourly_baseline(self.baseline.per_hour(fo.ts))
-        self.engine.on_force_order(fo)
-        self._flush_new_logs()
 
     def on_agg_trade_msg(self, data):
         if data["s"] != self.symbol.upper():
