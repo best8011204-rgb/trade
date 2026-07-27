@@ -184,6 +184,7 @@ class CommandHandler:
                 text = self.runner.status_summary()
                 if self.c_runner is not None:
                     text += "\n\n" + self._status_c()
+                text += "\n\n" + self._conditions_text()
                 return text
             if cmd == "/pnl":
                 return self._pnl()
@@ -217,6 +218,33 @@ class CommandHandler:
             return f"⚠️ 명령 처리 오류: {e}"
 
     # ---- 세부 구현 -------------------------------------------------------
+    def _conditions_text(self) -> str:
+        """/status 에 셋업별 요구조건 체크리스트를 현재 실시간 값과 함께 붙인다.
+        가격은 최신 체결틱(self.runner.last_price)을 써서, 예를 들어 "하락률
+        >= 0.3%" 같은 조건의 실제 현재 값이 매 /status 호출마다 최신으로 나온다
+        (봉 확정을 기다리지 않음). RVOL/OI처럼 원본 데이터 자체가 1분/5분
+        단위인 조건은 그 데이터의 마지막 확정치를 보여준다."""
+        now = time.time()
+        price = self.runner.last_price
+        oi = getattr(self.runner, "_latest_oi", None)
+        lines = ["[조건 상세]"]
+        lines.append("Setup A:")
+        lines.extend(self._format_conditions(self.runner.engine.a.conditions(now, current_price=price)))
+        lines.append("Setup B:")
+        lines.extend(self._format_conditions(self.runner.engine.b.conditions(now, current_price=price)))
+        if self.c_runner is not None:
+            lines.append("Setup C:")
+            lines.extend(self._format_conditions(self.c_runner.live_conditions(price, oi)))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_conditions(conds: list) -> list:
+        out = []
+        for c in conds:
+            mark = "✓" if c["met"] else "✗"
+            out.append(f"  {mark} {c['label']} — {c['detail']}")
+        return out
+
     def _status_c(self) -> str:
         """/status 에 Setup C(C1+C2) 블록을 덧붙인다. live_trade.LiveTradingRunner.
         status_summary()와 같은 형식(상태 요약 + 보유 레그 + 셋업별 건수/승률)."""
