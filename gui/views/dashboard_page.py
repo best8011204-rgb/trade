@@ -130,7 +130,7 @@ class DashboardPage:
         scroller = ScrollableFrame(left)
         scroller.pack(fill="both", expand=True)
 
-        self.trigger_a = TriggerSection(scroller.interior, "Setup A", theme.LONG_GREEN, max_rows=7)
+        self.trigger_a = TriggerSection(scroller.interior, "Setup A", theme.LONG_GREEN, max_rows=8)
         self.trigger_a.pack(fill="x")
         self.trigger_b = TriggerSection(scroller.interior, "Setup B", theme.SHORT_RED, max_rows=4)
         self.trigger_b.pack(fill="x")
