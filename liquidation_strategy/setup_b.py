@@ -2,25 +2,46 @@
 돌파/트랩드숏 플러시 롱)
 
 명세서 2장의 T1~T3 트리거와 2트랜치 실행 규칙을 구현한 상태 머신.
-박스(레인지, 기본 2시간 — CascadeBParams.box_window_min) 상단 또는 하단
-돌파 시도 -> OI 유입 확인 -> 트랩 확정 -> 연료(미청산 OI) 확인 순서로
-진행하며, 확정 시 `pending_signal`에 1차 진입 정보를 채운다.
+박스(레인지) 상단 또는 하단 돌파 시도 -> OI 유입 확인 -> 트랩 확정 ->
+연료(미청산 OI) 확인 순서로 진행하며, 확정 시 `pending_signal`에 1차 진입
+정보를 채운다.
 
 [양방향 확장] 상단 돌파(신규 롱 유입 함정 -> 숏 진입)와 하단 돌파(신규 숏
 유입 함정 -> 롱 진입)를 breakout_side("up"|"down")로 구분해 같은 상태머신이
 동시에 감시한다. T1(OI 증가 확인)은 방향과 무관하게 동일한 계산식을 쓴다 —
 신규 포지션이 들어오면 어느 방향이든 OI가 늘어나기 때문이다.
+
+[계층형 박스] 박스는 두 단계로 결정된다 (실제 계산은 live_feed.py가 담당,
+이 파일은 계산된 box_low/box_high를 받아 쓰기만 한다):
+  1) 일봉 레짐 게이트(DailyBoxRegime, 아래) — 최근 box_daily_lookback_days일의
+     일봉으로 "지금이 레인지(응축) 구간인가 추세(돌파) 구간인가"만 판정한다.
+     레인지 구간이 아니면(=일봉 기준 박스가 존재하지 않으면) 신규 트리거를
+     찾지 않는다("돌파 구간"). 90일 동안 응축 구간이 여러 번 나타났다 사라졌다
+     할 수 있으므로 "박스가 여러 개 선정될 수 있다"는 요구사항은 이 게이트의
+     자연스러운 결과다 — 각 응축 구간이 곧 하나의 '일봉 박스'다.
+  2) 5분봉 박스 — 실제 상단/하단 값은 5분봉 120개(가장 최근 12개는 제외,
+     13~120번째 봉만 사용)로 계산한다. 최근 봉을 박스 형성에서 빼는 이유는
+     지금 막 형성 중인 가격 움직임 자체가 박스 경계를 만들어버려 그 움직임의
+     돌파 여부를 자기 자신과 비교하는 문제(이전 버그)를 원천적으로 피하기
+     위함이다 — 1시간의 안전 여유를 둔 것.
+  일봉 레짐이 "돌파 구간"이면 box_low/box_high가 아예 None으로 유지되고,
+  아래 on_candle()의 첫 줄(`if self.box_high is None: return`)이 신규 트리거
+  탐지를 자동으로 멈춘다(기존 열린 포지션 관리는 영향 없음).
 """
 
+from collections import deque
 from dataclasses import dataclass
 from .data_types import Candle, OIPoint
+from .setup_a import _quantile
 
 
 @dataclass
 class CascadeBParams:
-    box_window_min: int = 120          # 박스(레인지) 계산 창(분). 구 4시간(240분)에서 축소
-                                        # — 짧을수록 상단-하단 폭이 좁아져 돌파가 더 쉽게 잡힌다.
-                                        # live_feed.py 등 박스를 실제로 계산하는 쪽에서 이 값을 읽는다.
+    box_5m_bars: int = 120                     # 5분봉 박스: 사용할 봉 개수(13~120번째)
+    box_5m_exclude_recent: int = 12             # 5분봉 박스: 박스 형성에서 제외할 최근 봉 개수(=1시간)
+    box_daily_lookback_days: int = 90           # 일봉 레짐 판정용 히스토리 길이
+    box_daily_atr_window: int = 14              # 일봉 ATR 창(일)
+    box_daily_compression_quantile: float = 0.30  # 일봉 레인지/ATR比가 하위 몇 %여야 "레인지(응축)"로 보는가
     oi_increase_pct: float = 0.006     # T1: 돌파 구간 OI 증가율 (양방향 공용)
     retest_window_s: float = 30 * 60   # T2: 재탈환 시도 허용 시간
     oi_return_tolerance: float = 0.002 # T3: '돌파 전 수준으로 회귀' 판정 오차
@@ -29,6 +50,52 @@ class CascadeBParams:
     time_exit_s: float = 8 * 3600      # 시간 청산 (8시간)
     lev_10x_liq_pct: float = 0.09      # 10x 청산가 근사 (평균단가 대비 ±9%)
     lev_25x_liq_pct: float = 0.038     # 25x 청산가 근사 (평균단가 대비 ±3.8%)
+
+
+class DailyBoxRegime:
+    """일봉 기준 "지금이 레인지(박스권)인가 추세(돌파구간)인가"만 판정하는
+    게이트. 실제 돌파 판정에 쓰는 박스 값 자체는 만들지 않는다(그건 5분봉
+    박스가 담당) — 오직 "지금 Setup B가 신규 트리거를 찾아도 되는 레짐인가"만
+    gate한다. Setup B 파라미터(box_daily_*)로 조정하므로 CascadeBParams를
+    매 호출 시점에 받는다(재시작해도 누적된 일봉 히스토리 자체는 유지).
+    """
+
+    def __init__(self):
+        self._daily = deque()  # (ts, high, low, close), 오래된 것부터 정렬
+
+    def on_daily_candle(self, ts: float, high: float, low: float, close: float):
+        self._daily.append((ts, high, low, close))
+        # 여유(ATR 창 + 약간의 버퍼)를 두고 넉넉히 보관 — 정확한 컷은 is_range_regime에서 함
+
+    def is_range_regime(self, p: CascadeBParams) -> bool:
+        days = list(self._daily)
+        n = len(days)
+        aw = p.box_daily_atr_window
+        if n < aw + 31:  # ATR 워밍업 + 분위수 최소 표본(30) 확보에 필요한 최소치
+            return False
+
+        trs = [None]  # trs[0]은 이전 종가가 없어 계산 불가 -> days와 인덱스 정렬용 자리표시
+        for i in range(1, n):
+            h, l = days[i][1], days[i][2]
+            pc = days[i - 1][3]
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+
+        lookback_days = min(n, p.box_daily_lookback_days + aw)
+        start = n - lookback_days
+        ratios = []
+        for i in range(max(start, aw), n):
+            atr_i = sum(trs[i - aw + 1: i + 1]) / aw
+            if atr_i <= 0:
+                continue
+            h, l = days[i][1], days[i][2]
+            ratios.append((h - l) / atr_i)
+
+        if len(ratios) < 30:
+            return False
+
+        today_ratio = ratios[-1]
+        gate = _quantile(ratios, p.box_daily_compression_quantile)
+        return gate is not None and today_ratio <= gate
 
 
 class TrappedLongFlushShort:
