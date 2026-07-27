@@ -1,9 +1,10 @@
-"""Setup B 실데이터 과거 백테스트.
+"""Setup A+B 실데이터 과거 백테스트.
 
-klines(가격) + openInterestHist(OI) 만으로 재구성 가능한 Setup B를 실제
-Binance 과거 데이터로 백테스트한다. Setup A(청산 캐스케이드)는 forceOrder의
-공개 과거 이력 REST가 없어 여기서 재현할 수 없다 — live_feed.py로 스트림을
-직접 녹화해 데이터를 쌓아야 한다 (명세서 4장 주의사항).
+klines(가격) + openInterestHist(OI) 만으로 Setup A/B를 함께 실제 Binance
+과거 데이터로 백테스트한다. [재설계] Setup A는 이제 forceOrder(청산 틱)
+없이 캔들+거래량+OI만으로 동작하므로(setup_a.py 참고), 예전처럼 "forceOrder
+과거 이력이 없어서 Setup A는 비활성"일 필요가 없다 — Setup B와 똑같은
+REST 데이터로 Setup A도 재현된다.
 
 openInterestHist는 Binance가 최근 30일까지만 제공하므로 조회 구간은
 자동으로 그 안으로 제한된다.
@@ -64,9 +65,8 @@ def run(days: int, symbol: str = SYMBOL, a_params=None, b_params=None,
     if not candles:
         raise RuntimeError("klines 수집 실패 — 네트워크/레이트리밋 확인")
 
-    print("[3/3] Setup B 백테스트 실행 (Setup A는 forceOrder 실데이터 없음 — 비활성)...", file=sys.stderr)
+    print("[3/3] Setup A+B 백테스트 실행...", file=sys.stderr)
     engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams())
-    engine.a.set_hourly_baseline(None)  # forceOrder 데이터 없음 -> Setup A 탐지 비활성(IDLE 고정)
 
     box_series = build_box_series(candles)
     box_by_ts = {b[0]: (b[1], b[2]) for b in box_series}
@@ -90,7 +90,7 @@ def run(days: int, symbol: str = SYMBOL, a_params=None, b_params=None,
         "days": days,
         "n_candles": len(candles),
         "roundtrip_cost_bps": engine.cost_bps,
-        "data_source": "binance_rest_real (Setup B만; Setup A는 forceOrder 과거이력 미제공)",
+        "data_source": "binance_rest_real (Setup A/B 모두)",
     }
     out = build_report(engine, candles, meta)
     with open(out_path, "w") as f:
@@ -100,7 +100,7 @@ def run(days: int, symbol: str = SYMBOL, a_params=None, b_params=None,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Setup B 실데이터(Binance REST) 백테스트")
+    ap = argparse.ArgumentParser(description="Setup A+B 실데이터(Binance REST) 백테스트")
     ap.add_argument("--days", type=int, default=29, help="조회 기간(일), openInterestHist 한도상 최대 29")
     ap.add_argument("--symbol", default=SYMBOL)
     ap.add_argument("--out", default="liquidation_strategy_output_real_b.json")
