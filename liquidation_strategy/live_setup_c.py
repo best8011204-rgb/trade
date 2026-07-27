@@ -16,7 +16,7 @@ import pandas as pd
 
 from .setup_c import (
     ParamsC, compute_features, advance_c1, advance_c2, C1State, C2State,
-    conditions_c1, conditions_c2,
+    conditions_c1, conditions_c2, conditions_c1_live, conditions_c2_live,
 )
 from .backtest_c import Ledger
 
@@ -64,6 +64,10 @@ class LiveSetupCRunner:
         self.log: list[tuple] = []
         self._c1_conditions: list[dict] = []
         self._c2_conditions: list[dict] = []
+        # 마지막 확정봉 기준 게이트/기준값 캐시 — live_conditions()가 매초 체결틱으로
+        # IDLE 상태 조건을 다시 계산할 때 rolling quantile을 재정렬하지 않고 이걸 쓴다.
+        self._c1_cache: dict = {}
+        self._c2_cache: dict = {}
 
     # ------------------------------------------------------------------
     def on_oi(self, oi_value: float, ts: float):
@@ -87,6 +91,18 @@ class LiveSetupCRunner:
 
         self._c1_conditions = conditions_c1(f, i, self.c1_state, self.p)
         self._c2_conditions = conditions_c2(f, i, self.c2_state, self.p)
+        row = f.iloc[i]
+        self._c1_cache = {
+            "atr": row["atr"], "oi_chg_c1_qlo": row["oi_chg_c1_qlo"],
+            "rvol_qhi": row["rvol_qhi"], "rvol": row["rvol"],
+            "last_conditions": self._c1_conditions,
+        }
+        self._c2_cache = {
+            "realized_range_c2_qlo": row["realized_range_c2_qlo"],
+            "oi_trend_c2_qhi": row["oi_trend_c2_qhi"],
+            "vol_med_c2": row["vol_med_c2"], "vol_med_c2_qlo": row["vol_med_c2_qlo"],
+            "last_conditions": self._c2_conditions,
+        }
 
         if not self.enabled:
             return
@@ -211,6 +227,21 @@ class LiveSetupCRunner:
         def _prefix(conds, tag):
             return [{**c, "label": f"{tag} {c['label']}"} for c in conds]
         return _prefix(self._c1_conditions, "[C1]") + _prefix(self._c2_conditions, "[C2]")
+
+    def live_conditions(self, live_price: float = None, live_oi: float = None) -> list[dict]:
+        """1초 폴링용 실시간 버전 — IDLE 상태 조건(가격/OI 관련)은 체결 틱으로
+        매초 갱신되고, 그 외 상태(봉 카운트 기반 확인 중)는 마지막 확정봉
+        기준값을 그대로 보여준다. live_price/live_oi가 아직 없으면(연결 직후)
+        last_conditions와 동일하게 동작한다."""
+        if live_price is None or not self._rows:
+            return self.last_conditions
+
+        def _prefix(conds, tag):
+            return [{**c, "label": f"{tag} {c['label']}"} for c in conds]
+
+        c1 = conditions_c1_live(list(self._rows), self.c1_state, self._c1_cache, live_price, live_oi, self.p)
+        c2 = conditions_c2_live(list(self._rows), self.c2_state, self._c2_cache, live_price, live_oi, self.p)
+        return _prefix(c1, "[C1]") + _prefix(c2, "[C2]")
 
 
 def _max_consec_losses(trades: list) -> int:
