@@ -273,6 +273,50 @@ def conditions_c1(f: pd.DataFrame, i: int, state: C1State, p: ParamsC) -> list[d
     return out
 
 
+def conditions_c1_live(rows: list, state: C1State, cache: dict, live_price: float,
+                        live_oi: float, p: ParamsC) -> list[dict]:
+    """conditions_c1()의 실시간(체결 틱) 버전 — 5분봉 확정을 기다리지 않고 매초
+    갱신하기 위한 것. rows: 확정봉 원시 dict 리스트(라이브 러너의 캔들 히스토리).
+    cache: 마지막 확정봉에서 계산해둔 {"atr","oi_chg_c1_qlo","rvol_qhi","rvol",
+    "last_conditions"}. IDLE 상태에서만 가격/OI를 라이브 틱으로 다시 계산한다
+    (RVOL은 아직 진행 중인 5분봉의 거래량을 추적하지 않아 마지막 확정치를 그대로 쓴다).
+    IDLE이 아니면(WATCH_EXHAUST 등, 봉 카운트 기반 조건이라 틱 단위 라이브화가
+    의미 없음) 마지막으로 계산된 확정봉 기준 conditions_c1() 결과를 그대로 반환."""
+    if state.state != "IDLE":
+        return cache.get("last_conditions") or [
+            {"key": "c1_state", "label": f"C1 상태: {state.state}", "met": True, "detail": state.state}]
+
+    out = [{"key": "c1_state", "label": "C1 상태: IDLE", "met": False, "detail": "IDLE"}]
+    if len(rows) < p.c1_cascade_window_bars:
+        out.append({"key": "c1_drop", "label": f"가격하락 >= ATRx{p.c1_price_drop_atr_mult}",
+                    "met": False, "detail": "히스토리 부족"})
+        return out
+
+    base_close = rows[-p.c1_cascade_window_bars]["close"]
+    base_oi = rows[-p.c1_cascade_window_bars].get("oi")
+    atr_now = cache.get("atr")
+    drop_atr = ((base_close - live_price) / atr_now
+                if atr_now is not None and np.isfinite(atr_now) and atr_now > 0 else None)
+    oi_chg_now = ((live_oi - base_oi) / base_oi
+                  if base_oi and live_oi is not None else None)
+    oi_gate = cache.get("oi_chg_c1_qlo")
+    rvol_now = cache.get("rvol")     # 진행 중인 봉의 거래량은 아직 모르므로 마지막 확정치
+    rvol_gate = cache.get("rvol_qhi")
+
+    out.append({"key": "c1_drop", "label": f"가격하락 >= ATRx{p.c1_price_drop_atr_mult}",
+                "met": bool(drop_atr is not None and drop_atr >= p.c1_price_drop_atr_mult),
+                "detail": f"{drop_atr:.2f}x" if drop_atr is not None else "계산불가"})
+    out.append({"key": "c1_oi", "label": f"DeltaOI 하위{p.c1_oi_drop_quantile*100:.0f}%",
+                "met": bool(oi_chg_now is not None and oi_gate is not None
+                            and np.isfinite(oi_gate) and oi_chg_now <= oi_gate),
+                "detail": f"{oi_chg_now*100:.2f}%" if oi_chg_now is not None else "N/A"})
+    out.append({"key": "c1_rvol", "label": f"RVOL 상위{(1-p.c1_rvol_quantile)*100:.0f}%",
+                "met": bool(rvol_now is not None and rvol_gate is not None
+                            and np.isfinite(rvol_now) and np.isfinite(rvol_gate) and rvol_now >= rvol_gate),
+                "detail": f"{rvol_now:.2f}" if rvol_now is not None and np.isfinite(rvol_now) else "N/A"})
+    return out
+
+
 # ---------------------------------------------------------------- C2: Coil-Break with OI Filter
 
 @dataclass
@@ -404,6 +448,55 @@ def conditions_c2(f: pd.DataFrame, i: int, state: C2State, p: ParamsC) -> list[d
                     "met": bool(np.isfinite(row["oi_trend_c2"]) and np.isfinite(row["oi_trend_c2_qhi"])
                                 and row["oi_trend_c2"] >= row["oi_trend_c2_qhi"]),
                     "detail": f"{row['oi_trend_c2']*100:.2f}%" if np.isfinite(row["oi_trend_c2"]) else "N/A"})
+        out.append({"key": "c2_vol", "label": f"거래량 수축(하위{p.c2_vol_contraction_quantile*100:.0f}%)",
+                    "met": bool(np.isfinite(row["vol_med_c2"]) and np.isfinite(row["vol_med_c2_qlo"])
+                                and row["vol_med_c2"] <= row["vol_med_c2_qlo"]),
+                    "detail": f"{row['vol_med_c2']:.2f}" if np.isfinite(row["vol_med_c2"]) else "N/A"})
     elif state.state == "BREAKOUT_PENDING":
         out.append({"key": "c2_dir", "label": "돌파 방향", "met": True, "detail": state.breakout_side})
+    return out
+
+
+def conditions_c2_live(rows: list, state: C2State, cache: dict, live_price: float,
+                        live_oi: float, p: ParamsC) -> list[dict]:
+    """conditions_c2()의 실시간(체결 틱) 버전 — conditions_c1_live()와 동일한 목적.
+    거래량 수축 조건은 진행 중인 봉의 거래량을 추적하지 않으므로 마지막 확정치를 쓴다."""
+    if state.state != "IDLE":
+        return cache.get("last_conditions") or [
+            {"key": "c2_state", "label": f"C2 상태: {state.state}", "met": True, "detail": state.state}]
+
+    out = [{"key": "c2_state", "label": "C2 상태: IDLE", "met": False, "detail": "IDLE"}]
+    if len(rows) < p.c2_coil_window_bars:
+        out.append({"key": "c2_range", "label": f"레인지 응축(하위{p.c2_coil_range_quantile*100:.0f}%)",
+                    "met": False, "detail": "히스토리 부족"})
+        return out
+
+    window = rows[-p.c2_coil_window_bars:]
+    win_high = max(r["high"] for r in window)
+    win_low = min(r["low"] for r in window)
+    if live_price is not None:
+        win_high = max(win_high, live_price)
+        win_low = min(win_low, live_price)
+    realized_range = (win_high - win_low) / live_price if live_price else None
+    rr_gate = cache.get("realized_range_c2_qlo")
+
+    base_oi = window[0].get("oi")
+    oi_trend_now = ((live_oi - base_oi) / base_oi) if base_oi and live_oi is not None else None
+    oi_gate = cache.get("oi_trend_c2_qhi")
+
+    vol_med_now = cache.get("vol_med_c2")     # 진행 중인 봉의 거래량은 아직 모르므로 마지막 확정치
+    vol_gate = cache.get("vol_med_c2_qlo")
+
+    out.append({"key": "c2_range", "label": f"레인지 응축(하위{p.c2_coil_range_quantile*100:.0f}%)",
+                "met": bool(realized_range is not None and rr_gate is not None
+                            and np.isfinite(rr_gate) and realized_range <= rr_gate),
+                "detail": f"{realized_range*100:.2f}%" if realized_range is not None else "N/A"})
+    out.append({"key": "c2_oi", "label": f"OI 축적(상위{(1-p.c2_oi_rise_quantile)*100:.0f}%)",
+                "met": bool(oi_trend_now is not None and oi_gate is not None
+                            and np.isfinite(oi_gate) and oi_trend_now >= oi_gate),
+                "detail": f"{oi_trend_now*100:.2f}%" if oi_trend_now is not None else "N/A"})
+    out.append({"key": "c2_vol", "label": f"거래량 수축(하위{p.c2_vol_contraction_quantile*100:.0f}%)",
+                "met": bool(vol_med_now is not None and vol_gate is not None
+                            and np.isfinite(vol_med_now) and np.isfinite(vol_gate) and vol_med_now <= vol_gate),
+                "detail": f"{vol_med_now:.2f}" if vol_med_now is not None and np.isfinite(vol_med_now) else "N/A"})
     return out
