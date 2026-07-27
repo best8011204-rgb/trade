@@ -1,27 +1,36 @@
-"""Setup A — 청산 캐스케이드 소진 롱 (Cascade Exhaustion Long)
+"""Setup A — 청산 캐스케이드 소진 (양방향: 롱청산 하락 캐스케이드 / 숏청산 상승 캐스케이드)
 
 [재설계] forceOrder(청산 틱) 없이 캔들 + 거래량 + OI만으로 동작한다.
-이론적 근거는 setup_c.py의 Price x OI 상태 분류기와 동일: 가격 하락이
-디레버리징(청산)인지 신규 숏(추세)인지는 OI로만 구분되고, 급격한 OI
-하락은 청산 캐스케이드의 집계 발자국이다. forceOrder 틱을 직접 못 봐도
-그 결과로 나타나는 "가격 급락 + OI 급감 + 거래량 폭증"은 캔들 스트림만으로
+이론적 근거는 setup_c.py의 Price x OI 상태 분류기와 동일: 가격 변동이
+디레버리징(청산)인지 신규 포지션(추세)인지는 OI로만 구분되고, 급격한 OI
+하락은 청산 캐스케이드의 집계 발자국이다(방향 무관 — 롱 청산이든 숏 청산이든
+포지션이 강제로 닫히면 OI는 줄어든다). forceOrder 틱을 직접 못 봐도 그
+결과로 나타나는 "가격 급변 + OI 급감 + 거래량 폭증"은 캔들 스트림만으로
 탐지 가능하다 — 이게 이 모듈이 지역 차단 등으로 forceOrder가 전혀 안 들어와도
 정상 작동하는 이유다.
 
-트리거 구조(T1~T4)는 원래 명세와 동일하게 유지하되, 데이터 소스만 교체했다:
-  T1(캐스케이드 감지): 60~180초 창의 가격하락이 ATR의 N배 이상
+[양방향 확장] T1이 하락(롱 청산 캐스케이드 -> 소진 후 롱 진입)과 상승(숏 청산
+캐스케이드 -> 소진 후 숏 진입) 둘 다 같은 %(ATR 배수/분위수) 기준으로 동시에
+감시한다. 트리거 방향은 cascade_side("long"|"short")에 기록되고, T2~T4와
+compute_exits()가 그 방향에 맞춰 거울상으로 동작한다:
+
+  가격 하락 + OI 하락 + RVOL 상승 -> cascade_side="long"  (롱 청산 소진 -> 롱 진입)
+  가격 상승 + OI 하락 + RVOL 상승 -> cascade_side="short" (숏 청산 소진 -> 숏 진입)
+
+트리거 구조(T1~T4):
+  T1(캐스케이드 감지): cascade_window_s 창의 가격 변동(절대값)이 ATR의 N배 이상
                        & DeltaOI%가 최근 분포 하위 q% & RVOL이 상위 q%
-                       (구: 60초 SELL청산 합계 >= 시간당평균*N & 최소 연쇄건수)
-  T2(가격이탈 확인):   캐스케이드 시작 대비 추가 하락률 (변경 없음 — 원래도 캔들 기반)
-  T3(소진 확인):       OI 감속(2차미분 부호전환) + 반전캔들(CLV/윅비대칭)
-                       + CVD 양전환 + 반등 유지
-                       (구: 무청산 경과시간 -> OI 감속 확인으로 대체.
-                        CVD/반등은 원래도 forceOrder와 무관했으므로 변경 없음)
-  T4(매크로 블랙아웃): 변경 없음
+                       (부호로 방향 결정, 임계값은 양방향 공용)
+  T2(가격이탈 확인):   캐스케이드 시작 대비 추가 변동률(같은 방향으로 심화)
+  T3(소진 확인):       OI 감속(2차미분 부호전환)
+                       + 반전캔들(롱: CLV 높음+하단윅 우세 / 숏: CLV 낮음+상단윅 우세)
+                       + CVD 반전(롱: 양전환 / 숏: 음전환) + 되돌림 유지
+  T4(매크로 블랙아웃): 방향 무관, 변경 없음
 
 StrategyEngine과의 계약(state/cascade_id/log/pending_signal/compute_exits/
 describe/conditions/reset/allow_reentry/register_reentry/macro_blackouts)은
-전부 그대로 유지한다 — engine.py는 이 파일의 내부 구현을 몰라도 된다.
+그대로 유지한다 — engine.py는 pending_signal의 "side" 키만 보고 Trade의
+Side.LONG/SHORT을 결정한다.
 """
 
 import statistics
@@ -48,20 +57,20 @@ def _quantile(values: list, q: float):
 @dataclass
 class CascadeAParams:
     lookback_hours: float = 24.0          # DeltaOI%/RVOL 분포(분위수 게이트) 산정 구간
-    cascade_window_s: float = 180.0       # T1: 가격/OI 변화 관찰 창(구 60초 — 다중 봉 관찰 위해 확장)
-    price_drop_atr_mult: float = 1.5      # T1: 윈도우 하락폭이 ATR의 몇 배 이상이어야 하는가 (구 vol_multiplier 대체)
-    oi_drop_quantile: float = 0.05        # T1: DeltaOI%가 최근 분포 하위 몇 %여야 디레버리징으로 보는가 (구 min_chain 대체)
-    rvol_quantile: float = 0.90           # T1: RVOL이 최근 분포 상위 몇 %여야 강제활동으로 보는가 (신규)
+    cascade_window_s: float = 120.0       # T1: 가격/OI 변화 관찰 창(양방향 공용)
+    price_drop_atr_mult: float = 1.5      # T1: 윈도우 변동폭(절대값)이 ATR의 몇 배 이상이어야 하는가 (양방향 동일 배수)
+    oi_drop_quantile: float = 0.05        # T1: DeltaOI%가 최근 분포 하위 몇 %여야 디레버리징으로 보는가 (방향 무관 — 청산은 항상 OI 감소)
+    rvol_quantile: float = 0.90           # T1: RVOL이 최근 분포 상위 몇 %여야 강제활동으로 보는가
     rvol_baseline_bars: int = 20          # RVOL 중앙값 기준 창(1분봉 개수)
     atr_window_bars: int = 14             # ATR 계산 창(1분봉 개수)
-    min_move_pct: float = 0.004           # T2: 캐스케이드 시작 대비 하락률 (변경 없음)
-    cvd_window_s: float = 60.0            # T3: 1분 CVD (변경 없음 — aggTrade 기반, forceOrder 무관)
-    oi_decel_confirm_s: float = 45.0      # T3: OI 감속+반전캔들 유지 시간 (구 exhaustion_gap_s "무청산 경과" 대체)
-    reversal_clv_min: float = 0.7         # T3: 반전 캔들 판정 — CLV 최소치(스케일 없는 비율이라 고정 상수)
-    reversal_wick_ratio_min: float = 1.5  # T3: 반전 캔들 판정 — 하단윅/상단윅 최소 비율
-    rebound_pct: float = 0.0008           # T3: 저점 대비 반등폭 (변경 없음)
-    rebound_hold_s: float = 15.0          # T3: 반등 유지 시간 (변경 없음)
-    sl_buffer_pct: float = 0.0015         # 손절 = 저점 - 버퍼
+    min_move_pct: float = 0.004           # T2: 캐스케이드 시작 대비 추가 변동률(양방향 동일 %)
+    cvd_window_s: float = 60.0            # T3: 1분 CVD (forceOrder 무관)
+    oi_decel_confirm_s: float = 45.0      # T3: OI 감속+반전캔들 유지 시간
+    reversal_clv_min: float = 0.7         # T3: 반전 캔들 판정 — CLV 임계치(스케일 없는 비율이라 고정 상수)
+    reversal_wick_ratio_min: float = 1.5  # T3: 반전 캔들 판정 — 우세 윅/반대 윅 최소 비율
+    rebound_pct: float = 0.0008           # T3: 극값 대비 되돌림폭(양방향 동일 %)
+    rebound_hold_s: float = 15.0          # T3: 되돌림 유지 시간
+    sl_buffer_pct: float = 0.0015         # 손절 = 극값 ± 버퍼
     tp1_retrace: float = 0.38             # 되돌림 38%
     tp2_retrace: float = 0.618            # 되돌림 61.8%
     tp1_fraction: float = 0.5             # TP1에서 청산할 비율
@@ -70,8 +79,8 @@ class CascadeAParams:
 
 
 class CascadeExhaustionLong:
-    """T1~T4 감지 + 포지션 관리 상태 머신. 스트리밍(캔들 1건씩) 입력, pandas 무사용
-    (setup_a.py/setup_b.py의 기존 관례 유지 — setup_c.py만 DataFrame 배치 처리)."""
+    """T1~T4 감지 + 포지션 관리 상태 머신 (양방향). 스트리밍(캔들 1건씩) 입력,
+    pandas 무사용(setup_a.py/setup_b.py의 기존 관례 유지)."""
 
     MIN_DIST_SAMPLES = 30    # 분위수 게이트가 유효하려면 최소 이만큼 표본이 쌓여야 한다
     GATE_REFRESH_TICKS = 5   # 분위수 게이트 재계산 주기(틱=캔들 수)
@@ -87,7 +96,7 @@ class CascadeExhaustionLong:
         self._prev_close = None
         self._tr_hist = deque()            # true range, 길이<=atr_window_bars
         self._vol_hist = deque()           # volume, 길이<=rvol_baseline_bars
-        self._close_win = deque()          # (ts, close) — cascade_window_s+버퍼만 유지(하락폭 계산용)
+        self._close_win = deque()          # (ts, close) — cascade_window_s+버퍼만 유지(변동폭 계산용)
         self._oi_win = deque()             # (ts, oi) — cascade_window_s+버퍼만 유지(DeltaOI%용)
         self._oi_chg_dist = deque()        # (ts, oi_chg_now) — lookback_hours 유지, 분위수 게이트용
         self._rvol_dist = deque()          # (ts, rvol_now) — lookback_hours 유지, 분위수 게이트용
@@ -102,16 +111,17 @@ class CascadeExhaustionLong:
         self._gate_tick_count = 0
 
         self.state = "IDLE"                # IDLE -> CASCADE -> WATCH_EXHAUST -> ARMED
+        self.cascade_side = None           # "long"(하락 캐스케이드->롱 진입) | "short"(상승 캐스케이드->숏 진입)
         self.cascade_start_ts = None
         self.cascade_start_price = None
-        self.cascade_low = None
-        self.cascade_low_ts = None
+        self.cascade_extreme = None        # long: 캐스케이드 저점, short: 캐스케이드 고점
+        self.cascade_extreme_ts = None
         self.rebound_since_ts = None
         self.reentry_count = 0
         self.cascade_id = 0
         self._exhaust_confirm_run = 0
 
-        self.pending_signal = None         # {"ts", "price", "tag"} 진입 신호
+        self.pending_signal = None         # {"ts","price","side","cascade_extreme","cascade_start_price","tag"}
         self.log = []
 
     def _in_macro_blackout(self, ts: float) -> bool:
@@ -135,6 +145,8 @@ class CascadeExhaustionLong:
 
     @staticmethod
     def _wick_ratio(c: Candle, cap: float = 100.0) -> float:
+        """하단윅/상단윅 비율. 롱 방향 반전(저점에서 하단윅 우세) 판정에 그대로 쓰고,
+        숏 방향 반전(고점에서 상단윅 우세) 판정엔 이 값의 역수 임계치를 비교한다."""
         body_hi = max(c.open, c.close)
         body_lo = min(c.open, c.close)
         lower = max(body_lo - c.low, 0.0)
@@ -176,6 +188,7 @@ class CascadeExhaustionLong:
         return (latest_oi - base_oi) / base_oi
 
     def _price_drop_atr(self, now_ts, now_close):
+        """반환: (base_close-now_close)/atr. 양수=가격 하락, 음수=가격 상승 (부호로 방향 판별)."""
         base_close = self._value_at_or_before(self._close_win, now_ts - self.p.cascade_window_s)
         if base_close is None:
             return None, None
@@ -238,31 +251,48 @@ class CascadeExhaustionLong:
         oi_gate = self._oi_gate
         rvol_gate = self._rvol_gate
 
-        if (drop_atr is not None and drop_atr >= self.p.price_drop_atr_mult
-                and oi_chg_now is not None and oi_gate is not None and oi_chg_now <= oi_gate
-                and rvol_now is not None and rvol_gate is not None and rvol_now >= rvol_gate):
-            self.cascade_id += 1
-            self.state = "CASCADE"
-            self.cascade_start_ts = c.ts
-            self.cascade_start_price = base_close
-            self.cascade_low = min(base_close, c.close)
-            self.cascade_low_ts = c.ts
-            self.reentry_count = 0
-            self._exhaust_confirm_run = 0
-            self.log.append((c.ts, f"T1 캐스케이드 감지 (id={self.cascade_id}, "
-                                    f"하락={drop_atr:.2f}xATR, dOI={oi_chg_now*100:.2f}%, RVOL={rvol_now:.2f})"))
+        oi_ok = oi_chg_now is not None and oi_gate is not None and oi_chg_now <= oi_gate
+        rvol_ok = rvol_now is not None and rvol_gate is not None and rvol_now >= rvol_gate
+        if drop_atr is None or not (oi_ok and rvol_ok):
+            return
+
+        if drop_atr >= self.p.price_drop_atr_mult:
+            side = "long"       # 가격 급락 + OI 급감 -> 롱 청산 캐스케이드 -> 소진 후 롱 진입
+        elif -drop_atr >= self.p.price_drop_atr_mult:
+            side = "short"      # 가격 급등 + OI 급감 -> 숏 청산 캐스케이드 -> 소진 후 숏 진입
+        else:
+            return
+
+        self.cascade_id += 1
+        self.state = "CASCADE"
+        self.cascade_side = side
+        self.cascade_start_ts = c.ts
+        self.cascade_start_price = base_close
+        self.cascade_extreme = min(base_close, c.close) if side == "long" else max(base_close, c.close)
+        self.cascade_extreme_ts = c.ts
+        self.reentry_count = 0
+        self._exhaust_confirm_run = 0
+        dir_label = "하락(롱청산)" if side == "long" else "상승(숏청산)"
+        self.log.append((c.ts, f"T1 캐스케이드 감지 (id={self.cascade_id}, {dir_label} "
+                                f"{abs(drop_atr):.2f}xATR, dOI={oi_chg_now*100:.2f}%, RVOL={rvol_now:.2f})"))
 
     def _check_t3(self, c: Candle):
         p = self.p
+        long_side = self.cascade_side == "long"
+
         oi_chg_now = self._oi_change_now(c.ts)
         oi_decel_ok = False
         if oi_chg_now is not None and self._last_oi_chg_for_decel is not None:
-            oi_decel_ok = (oi_chg_now - self._last_oi_chg_for_decel) > 0  # 하락 속도 감속(2차미분 부호전환)
+            oi_decel_ok = (oi_chg_now - self._last_oi_chg_for_decel) > 0  # 하락 속도 감속(2차미분 부호전환, 방향 무관)
         if oi_chg_now is not None:
             self._last_oi_chg_for_decel = oi_chg_now
 
-        reversal_ok = (self._clv(c) >= p.reversal_clv_min
-                       and self._wick_ratio(c) >= p.reversal_wick_ratio_min)
+        clv = self._clv(c)
+        wick_ratio = self._wick_ratio(c)
+        if long_side:
+            reversal_ok = clv >= p.reversal_clv_min and wick_ratio >= p.reversal_wick_ratio_min
+        else:
+            reversal_ok = clv <= (1.0 - p.reversal_clv_min) and wick_ratio <= (1.0 / p.reversal_wick_ratio_min)
 
         if oi_decel_ok and reversal_ok:
             self._exhaust_confirm_run += 1
@@ -270,9 +300,15 @@ class CascadeExhaustionLong:
             self._exhaust_confirm_run = 0
         decel_hold_ok = self._exhaust_confirm_run * 60.0 >= p.oi_decel_confirm_s  # 1분봉 가정
 
-        cvd_ok = self._cvd_1m() >= 0
-        rebound_pct_now = (c.close - self.cascade_low) / self.cascade_low
-        if rebound_pct_now >= p.rebound_pct:
+        cvd = self._cvd_1m()
+        if long_side:
+            cvd_ok = cvd >= 0
+            move_pct_now = (c.close - self.cascade_extreme) / self.cascade_extreme
+        else:
+            cvd_ok = cvd <= 0
+            move_pct_now = (self.cascade_extreme - c.close) / self.cascade_extreme
+
+        if move_pct_now >= p.rebound_pct:
             if self.rebound_since_ts is None:
                 self.rebound_since_ts = c.ts
         else:
@@ -290,11 +326,13 @@ class CascadeExhaustionLong:
             self.pending_signal = {
                 "ts": c.ts,
                 "price": c.close,
-                "cascade_low": self.cascade_low,
+                "side": self.cascade_side,
+                "cascade_extreme": self.cascade_extreme,
                 "cascade_start_price": self.cascade_start_price,
                 "tag": f"A-{self.cascade_id}",
             }
-            self.log.append((c.ts, f"T3 소진 확인 -> 진입 신호 @ {c.close:.1f}"))
+            entry_label = "롱" if long_side else "숏"
+            self.log.append((c.ts, f"T3 소진 확인 -> {entry_label} 진입 신호 @ {c.close:.1f}"))
             self.state = "ARMED"
 
     def on_candle(self, c: Candle, oi_now: float = None):
@@ -303,13 +341,21 @@ class CascadeExhaustionLong:
         self._update_history(c, oi_now)
 
         if self.state in ("CASCADE", "WATCH_EXHAUST"):
-            if c.low < self.cascade_low:
-                self.cascade_low = c.low
-                self.cascade_low_ts = c.ts
-            move = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price
+            long_side = self.cascade_side == "long"
+            if long_side:
+                if c.low < self.cascade_extreme:
+                    self.cascade_extreme = c.low
+                    self.cascade_extreme_ts = c.ts
+                move = (self.cascade_start_price - self.cascade_extreme) / self.cascade_start_price
+            else:
+                if c.high > self.cascade_extreme:
+                    self.cascade_extreme = c.high
+                    self.cascade_extreme_ts = c.ts
+                move = (self.cascade_extreme - self.cascade_start_price) / self.cascade_start_price
             if self.state == "CASCADE" and move >= self.p.min_move_pct:
                 self.state = "WATCH_EXHAUST"
-                self.log.append((c.ts, f"T2 가격이탈 확인 move={move*100:.2f}%"))
+                dir_label = "하락" if long_side else "상승"
+                self.log.append((c.ts, f"T2 가격이탈 확인({dir_label}) move={move*100:.2f}%"))
 
         if self.state == "IDLE":
             self._check_t1(c)
@@ -324,7 +370,7 @@ class CascadeExhaustionLong:
     def describe(self, current_price: float = None):
         """현재 상태를 사람이 읽을 텍스트로 설명 (GUI/텔레그램 표시용).
 
-        current_price: 제공하면(체결 틱 기반 실시간가) 확정봉 사이에도 하락률
+        current_price: 제공하면(체결 틱 기반 실시간가) 확정봉 사이에도 변동률
         표시가 라이브로 갱신된다. 없으면 마지막 확정봉 기준(최대 1분 지연).
 
         반환: (설명 텍스트, 참고 가격 또는 None). 참고 가격은 차트에
@@ -333,35 +379,42 @@ class CascadeExhaustionLong:
         p = self.p
         if self.state == "IDLE":
             return (
-                f"청산 캐스케이드 대기 중 — {p.cascade_window_s:.0f}초 내 가격하락 ≥ ATR×{p.price_drop_atr_mult:.1f} "
+                f"청산 캐스케이드 대기 중(양방향) — {p.cascade_window_s:.0f}초 내 가격변동 ≥ ATR×{p.price_drop_atr_mult:.1f} "
                 f"& DeltaOI 하위{p.oi_drop_quantile*100:.0f}% & RVOL 상위{(1-p.rvol_quantile)*100:.0f}% "
-                "충족 시 추적 시작",
+                "충족 시 추적 시작(하락=롱청산/상승=숏청산 자동 판별)",
                 None,
             )
+        long_side = self.cascade_side == "long"
+        dir_word = "하락" if long_side else "상승"
+        entry_word = "롱" if long_side else "숏"
         if self.state == "CASCADE":
-            effective_low = min(self.cascade_low, current_price) if current_price is not None else self.cascade_low
+            if current_price is not None:
+                effective_extreme = (min(self.cascade_extreme, current_price) if long_side
+                                      else max(self.cascade_extreme, current_price))
+            else:
+                effective_extreme = self.cascade_extreme
             move_pct = 0.0
             if self.cascade_start_price:
-                move_pct = (self.cascade_start_price - effective_low) / self.cascade_start_price * 100
+                move_pct = (abs(effective_extreme - self.cascade_start_price) / self.cascade_start_price) * 100
             return (
-                f"캐스케이드 진행 중(#{self.cascade_id}) — 저점 {effective_low:,.1f} "
-                f"(시작가 대비 -{move_pct:.2f}%). -{p.min_move_pct*100:.2f}% 하락 확인되면 소진 관찰 시작",
-                effective_low,
+                f"{dir_word} 캐스케이드 진행 중(#{self.cascade_id}, {entry_word} 준비) — 극값 {effective_extreme:,.1f} "
+                f"(시작가 대비 {move_pct:.2f}%). {p.min_move_pct*100:.2f}% 변동 확인되면 소진 관찰 시작",
+                effective_extreme,
             )
         if self.state == "WATCH_EXHAUST":
             return (
-                f"하락 소진 확인 중 — 저점 {self.cascade_low:,.1f} 대비 +{p.rebound_pct*100:.2f}% 반등이 "
-                f"{p.rebound_hold_s:.0f}초 유지 + OI 감속·반전캔들 {p.oi_decel_confirm_s:.0f}초 + CVD 양전환 시 매수 진입",
-                self.cascade_low,
+                f"{dir_word} 소진 확인 중 — 극값 {self.cascade_extreme:,.1f} 대비 {p.rebound_pct*100:.2f}% 되돌림이 "
+                f"{p.rebound_hold_s:.0f}초 유지 + OI 감속·반전캔들 {p.oi_decel_confirm_s:.0f}초 + CVD 반전 시 {entry_word} 진입",
+                self.cascade_extreme,
             )
         if self.state == "ARMED":
-            return "진입 신호 발생 — 체결 대기 중", self.cascade_low
+            return f"진입 신호 발생({entry_word}) — 체결 대기 중", self.cascade_extreme
         return self.state, None
 
     def conditions(self, now_ts: float, current_price: float = None):
         """T1~T4 하위 조건 각각의 실시간 충족 여부 (GUI/텔레그램 체크리스트 표시용).
 
-        current_price: 제공하면(체결 틱 기반 실시간가) T1 하락폭/T2 하락률이
+        current_price: 제공하면(체결 틱 기반 실시간가) T1 변동폭/T2 변동률이
         확정봉 사이에도 매초 라이브로 갱신된다 — 없으면 마지막 확정봉 종가 기준
         (최대 1분 지연). RVOL/OI는 그 자체가 1분/5분 단위 데이터라 틱 단위로
         더 세분화할 수 없어 항상 마지막 확정치를 쓴다.
@@ -370,6 +423,7 @@ class CascadeExhaustionLong:
         """
         p = self.p
         out = []
+        long_side = self.cascade_side != "short"  # None(IDLE)이면 편의상 롱 표기 기본값
 
         now_close = current_price if current_price is not None else (
             self._prev_close if self._prev_close is not None else 0.0)
@@ -379,10 +433,15 @@ class CascadeExhaustionLong:
         oi_gate = self._oi_gate
         rvol_gate = self._rvol_gate
 
+        if drop_atr is not None:
+            dir_word = "하락" if drop_atr >= 0 else "상승"
+            drop_detail = f"{drop_atr:+.2f}x({dir_word})"
+        else:
+            drop_detail = "계산불가"
         out.append({
-            "key": "t1_drop", "label": f"T1: {p.cascade_window_s:.0f}초 하락 ≥ ATR×{p.price_drop_atr_mult:.1f}",
-            "met": bool(drop_atr is not None and drop_atr >= p.price_drop_atr_mult),
-            "detail": f"{drop_atr:.2f}x" if drop_atr is not None else "계산불가",
+            "key": "t1_drop", "label": f"T1: {p.cascade_window_s:.0f}초 변동 ≥ ATR×{p.price_drop_atr_mult:.1f}(양방향)",
+            "met": bool(drop_atr is not None and abs(drop_atr) >= p.price_drop_atr_mult),
+            "detail": drop_detail,
         })
         out.append({
             "key": "t1_oi", "label": f"T1: DeltaOI 하위{p.oi_drop_quantile*100:.0f}%",
@@ -395,15 +454,17 @@ class CascadeExhaustionLong:
             "detail": f"{rvol_now:.2f}" if rvol_now is not None else "N/A",
         })
 
-        effective_low = self.cascade_low
-        if current_price is not None and self.cascade_low is not None:
-            effective_low = min(self.cascade_low, current_price)
-        if self.cascade_start_price and effective_low is not None:
-            move_pct = (self.cascade_start_price - effective_low) / self.cascade_start_price
+        effective_extreme = self.cascade_extreme
+        if current_price is not None and self.cascade_extreme is not None:
+            effective_extreme = (min(self.cascade_extreme, current_price) if long_side
+                                  else max(self.cascade_extreme, current_price))
+        if self.cascade_start_price and effective_extreme is not None:
+            move_pct = abs(effective_extreme - self.cascade_start_price) / self.cascade_start_price
         else:
             move_pct = 0.0
+        move_word = "하락률" if long_side else "상승률"
         out.append({
-            "key": "t2_move", "label": f"T2: 하락률 ≥ {p.min_move_pct*100:.2f}%",
+            "key": "t2_move", "label": f"T2: {move_word} ≥ {p.min_move_pct*100:.2f}%",
             "met": move_pct >= p.min_move_pct,
             "detail": f"{move_pct*100:.2f}%",
         })
@@ -414,15 +475,17 @@ class CascadeExhaustionLong:
             "detail": f"{self._exhaust_confirm_run}봉 연속" if self._exhaust_confirm_run else "미확인",
         })
         cvd = self._cvd_1m()
+        cvd_label = "T3: 1분 CVD ≥ 0" if long_side else "T3: 1분 CVD ≤ 0"
         out.append({
-            "key": "t3_cvd", "label": "T3: 1분 CVD ≥ 0",
-            "met": cvd >= 0, "detail": f"{cvd:+.2f}",
+            "key": "t3_cvd", "label": cvd_label,
+            "met": (cvd >= 0) if long_side else (cvd <= 0), "detail": f"{cvd:+.2f}",
         })
         hold = (now_ts - self.rebound_since_ts) if self.rebound_since_ts is not None else 0.0
+        rebound_word = "반등" if long_side else "되돌림"
         out.append({
-            "key": "t3_rebound", "label": f"T3: 반등 {p.rebound_pct*100:.2f}% 유지 ≥ {p.rebound_hold_s:.0f}초",
+            "key": "t3_rebound", "label": f"T3: {rebound_word} {p.rebound_pct*100:.2f}% 유지 ≥ {p.rebound_hold_s:.0f}초",
             "met": self.rebound_since_ts is not None and hold >= p.rebound_hold_s,
-            "detail": f"{hold:.0f}초 유지 중" if self.rebound_since_ts is not None else "반등 미확인",
+            "detail": f"{hold:.0f}초 유지 중" if self.rebound_since_ts is not None else f"{rebound_word} 미확인",
         })
         blackout = self._in_macro_blackout(now_ts)
         out.append({
@@ -441,16 +504,24 @@ class CascadeExhaustionLong:
         self._exhaust_confirm_run = 0
 
     def reset(self):
-        """탐지 상태만 IDLE로 되돌린다. cascade_low/start_price 등은 재진입
-        판단(register_reentry)에 쓰일 수 있으므로 남겨둔다."""
+        """탐지 상태만 IDLE로 되돌린다. cascade_extreme/start_price/side 등은
+        재진입 판단(register_reentry)에 쓰일 수 있으므로 남겨둔다."""
         self.state = "IDLE"
         self.rebound_since_ts = None
         self._exhaust_confirm_run = 0
 
     @staticmethod
-    def compute_exits(entry_price: float, cascade_low: float, cascade_start_price: float, p: CascadeAParams):
-        move = cascade_start_price - cascade_low
-        sl = cascade_low * (1 - p.sl_buffer_pct)
-        tp1 = cascade_low + p.tp1_retrace * move
-        tp2 = cascade_low + p.tp2_retrace * move
+    def compute_exits(entry_price: float, cascade_extreme: float, cascade_start_price: float,
+                       p: CascadeAParams, side: str = "long"):
+        """side="long": 캐스케이드 저점 기준 위쪽 되돌림(기존과 동일).
+        side="short": 캐스케이드 고점 기준 아래쪽 되돌림(거울상)."""
+        move = abs(cascade_start_price - cascade_extreme)
+        if side == "long":
+            sl = cascade_extreme * (1 - p.sl_buffer_pct)
+            tp1 = cascade_extreme + p.tp1_retrace * move
+            tp2 = cascade_extreme + p.tp2_retrace * move
+        else:
+            sl = cascade_extreme * (1 + p.sl_buffer_pct)
+            tp1 = cascade_extreme - p.tp1_retrace * move
+            tp2 = cascade_extreme - p.tp2_retrace * move
         return sl, tp1, tp2
