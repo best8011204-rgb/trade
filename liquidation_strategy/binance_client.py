@@ -12,9 +12,30 @@
 
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://fapi.binance.com"
-_SESSION = requests.Session()
+
+
+def _make_session() -> requests.Session:
+    """장시간 살아있는 프로세스(PM2 등)에서 유휴 keep-alive 커넥션을 Binance
+    쪽이 조용히 끊어버려 다음 요청이 'Remote end closed connection without
+    response'로 실패하는 경우가 있다 — 재시도 어댑터를 붙여 그런 끊긴
+    커넥션/일시적 5xx는 새 커넥션으로 자동 재시도하게 한다."""
+    s = requests.Session()
+    retry = Retry(
+        total=3, connect=3, read=2, backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+_SESSION = _make_session()
 
 
 def _get(path, params=None, timeout=15):
