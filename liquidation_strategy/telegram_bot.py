@@ -147,7 +147,7 @@ HELP = """사용 가능한 명령:
 /trades [n] — 최근 청산 트레이드 n건 (기본 5)
 /params — 현재 전략 파라미터 (A/B)
 /set <a|b> <이름> <값> — 파라미터 변경 (즉시 적용+저장)
-   예: /set a vol_multiplier 2.5
+   예: /set a price_drop_atr_mult 2.0
 /pause — 신규 진입 중지 (기존 포지션 청산은 계속)
 /resume — 신규 진입 재개
 /close all — 보유 포지션 전량 청산
@@ -277,7 +277,7 @@ class CommandHandler:
 
     def _set(self, args):
         if len(args) != 3:
-            return "사용법: /set <a|b> <파라미터명> <값>\n예: /set a vol_multiplier 2.5"
+            return "사용법: /set <a|b> <파라미터명> <값>\n예: /set a price_drop_atr_mult 2.0"
         setup, name, raw = args[0].lower(), args[1], args[2]
         if setup not in ("a", "b"):
             return "첫 인자는 a 또는 b 여야 합니다."
