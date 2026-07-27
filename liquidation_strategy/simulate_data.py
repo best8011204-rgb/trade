@@ -39,16 +39,31 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
         shock = rng.normal(mu, sigma)
         price[i] = price[i - 1] * (1 + shock)
 
-    force_orders = []
+    force_orders = []  # 트리거엔 더 이상 안 쓰이지만(setup_a.py 재설계), 원시 이벤트
+                        # 볼륨 참고용으로 계속 생성해둔다 — 실데이터의 raw_events.jsonl과
+                        # 같은 성격.
     events = []
     cvd = np.zeros(minutes)  # 분당 CVD 델타 (기본 노이즈)
     cvd += rng.normal(0, 0.3, minutes)
 
-    # 시간당 평균 청산 명목가 baseline (엔진에 주입할 값)
+    # 시간당 평균 청산 명목가(레거시 리포트 표기용 통계치 — 더 이상 트리거에 안 쓰임)
     baseline_notional_per_hour = 250_000.0
+
+    # 거래량 배율(RVOL 게이트용) — 기본 1.0, 캐스케이드 구간에서만 폭증시킨다
+    vol_mult = np.ones(minutes)
+
+    # OI 배열 — Setup A(급감)와 Setup B(급증) 둘 다 같은 배열에 기록해야 하므로
+    # 두 주입 루프보다 먼저 만든다.
+    oi_base = 180_000.0
+    n_oi = minutes // 5 + 1
+    oi_noise = rng.normal(0, 1500, n_oi)
+    oi = np.full(n_oi, oi_base) + np.cumsum(oi_noise) * 0.02
+    oi = np.clip(oi, oi_base * 0.6, oi_base * 1.8)
 
     # ------------------------------------------------------------------
     # Setup A용: 청산 캐스케이드 주입 (주 3~10회 목표 -> 총 events ~= days/7*6)
+    # 가격 급락 + OI 급감(디레버리징) + 거래량 폭증(RVOL) 세 가지를 함께 주입한다 —
+    # setup_a.py 재설계 후 T1 트리거가 이 세 조건을 캔들+OI 스트림만으로 판정하므로.
     n_cascades = max(1, int(days / 7 * 6))
     cascade_starts = rng.choice(np.arange(120, minutes - 200), size=n_cascades, replace=False)
     for start in sorted(cascade_starts):
@@ -75,7 +90,16 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
             p = base * (1 - depth * min(1.0, (j + 1) / n_liqs))
             qty = notional / p
             force_orders.append(ForceOrder(ts=float(lt), side="SELL", price=float(p), qty=float(qty)))
-        last_liq_ts = liq_ts[-1]
+
+        # 거래량 폭증(RVOL 게이트용) — 캐스케이드 구간 거래량을 크게 키운다
+        vol_mult[start:start + cascade_len_min] *= rng.uniform(4.0, 10.0)
+
+        # OI 급감(디레버리징 확인, DeltaOI% 게이트용) — 캐스케이드 구간에 OI를 낮춘다
+        oi_drop_frac = rng.uniform(0.03, 0.08)
+        start5 = start // 5
+        end5 = min((start + cascade_len_min + 4) // 5 + 1, len(oi))
+        if start5 < len(oi):
+            oi[start5:end5] *= (1 - oi_drop_frac)
 
         # CVD: 캐스케이드 동안 강하게 음수, 소진 후 0 이상으로 전환
         cvd[start:start + cascade_len_min] -= rng.uniform(3, 8, cascade_len_min)
@@ -104,15 +128,9 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
         })
 
     # ------------------------------------------------------------------
-    # Setup B용: 트랩드롱 플러시 주입 (주 1~4회 목표)
+    # Setup B용: 트랩드롱 플러시 주입 (주 1~4회 목표). oi 배열은 위에서 이미 만들어짐
+    # (Setup A 캐스케이드의 OI 급감이 먼저 적용된 같은 배열 위에 이어서 기록한다).
     n_traps = max(1, int(days / 7 * 2.5))
-    oi_base = 180_000.0
-    oi = np.full(minutes // 5 + 1, oi_base) + rng.normal(0, 800, minutes // 5 + 1).cumsum() * 0.0
-    oi = np.full(minutes // 5 + 1, oi_base)
-    oi_noise = rng.normal(0, 1500, len(oi))
-    oi = oi + np.cumsum(oi_noise) * 0.02
-    oi = np.clip(oi, oi_base * 0.6, oi_base * 1.8)
-
     trap_starts = rng.choice(np.arange(300, minutes - 600), size=n_traps, replace=False)
     for start in sorted(trap_starts):
         box_high = float(np.max(price[max(0, start - 240):start]) * 1.0005)
@@ -163,12 +181,16 @@ def generate(days: int = 120, seed: int = 7, start_price: float = 62000.0) -> Si
         })
 
     # ------------------------------------------------------------------
-    # OHLC 근사 (1분봉이므로 open=이전 close, close=현재, high/low는 노이즈로 확장)
+    # OHLC 근사 (1분봉이므로 open=이전 close, close=현재, high/low는 노이즈로 확장).
+    # 상단/하단 윅을 독립적으로 뽑는다 — 같은 값을 공유하면 wick_ratio가 항상
+    # 정확히 1.0으로 고정되어(setup_a.py T3의 반전캔들 판정이 절대 안 통과) 실제
+    # 캔들의 상하 비대칭을 전혀 반영하지 못한다.
     opens = np.concatenate([[price[0]], price[:-1]])
-    wick = np.abs(rng.normal(0, 0.0004, minutes)) * price
-    highs = np.maximum(price, opens) + wick
-    lows = np.minimum(price, opens) - wick
-    vols = np.abs(rng.normal(50, 15, minutes))
+    upper_wick = np.abs(rng.normal(0, 0.0004, minutes)) * price
+    lower_wick = np.abs(rng.normal(0, 0.0004, minutes)) * price
+    highs = np.maximum(price, opens) + upper_wick
+    lows = np.minimum(price, opens) - lower_wick
+    vols = np.abs(rng.normal(50, 15, minutes)) * vol_mult
 
     candles = [
         Candle(ts=float(ts[i]), open=float(opens[i]), high=float(highs[i]),
