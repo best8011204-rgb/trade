@@ -2,3 +2,4 @@ numpy
 pandas
 requests
 websockets
+python-socks[asyncio]  # ws_proxy에 socks5:// 프록시를 쓸 경우에만 필요

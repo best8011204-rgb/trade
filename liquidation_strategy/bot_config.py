@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "out_json": "liquidation_strategy_output_live.json",
     "log_dir": "logs",
     "state_file": "bot_state.json",
+    "ws_proxy": "",                # 예: "socks5://127.0.0.1:1080" — fstream 웹소켓만 이 프록시로 우회.
+                                    # 비워두면 REST(fapi)/텔레그램 등 다른 트래픽처럼 직결 시도.
 }
 
 ENV_MAP = {
@@ -27,6 +29,7 @@ ENV_MAP = {
     "BINANCE_API_SECRET": "binance_api_secret",
     "TELEGRAM_BOT_TOKEN": "telegram_bot_token",
     "TELEGRAM_CHAT_ID": "telegram_chat_id",
+    "BINANCE_WS_PROXY": "ws_proxy",
 }
 
 
