@@ -141,9 +141,9 @@ class EngineRunner:
                     "c_text": self.c_runner.describe(), "c_level": None,
                 })
                 self.bus.publish("conditions", {
-                    "a_conditions": engine.a.conditions(c.ts),
-                    "b_conditions": engine.b.conditions(c.ts),
-                    "c_conditions": self.c_runner.last_conditions,
+                    "a_conditions": engine.a.conditions(c.ts, current_price=c.close),
+                    "b_conditions": engine.b.conditions(c.ts, current_price=c.close),
+                    "c_conditions": self.c_runner.live_conditions(c.close, latest_oi),
                 })
                 if candle_count % SUMMARY_EVERY_N_CANDLES == 0:
                     s = engine.summary()
