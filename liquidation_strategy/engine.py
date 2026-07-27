@@ -52,10 +52,17 @@ class StrategyEngine:
         self.b_enabled = True
 
     # ------------------------------------------------------------------
-    # 외부에서 매 캔들마다 박스(4h 레인지) 값을 갱신해준다고 가정
+    # 외부(live_feed.py)에서 5분봉 기준으로 계산한 박스 값을 갱신해준다고 가정
     def set_box(self, box_low: float, box_high: float):
         self.box_low, self.box_high = box_low, box_high
         self.b.update_box(box_low, box_high)
+
+    def clear_box(self):
+        """일봉 레짐이 "돌파 구간"이라 박스가 존재하지 않는 상태로 되돌린다.
+        on_candle()의 `if self.box_high is not None` 가드가 Setup B의 신규
+        트리거 탐지를 자동으로 멈춘다 — 이미 보유 중인 포지션 관리는 영향 없음."""
+        self.box_low, self.box_high = None, None
+        self.b.box_low, self.b.box_high = None, None
 
     def _has_side(self, side: Side) -> bool:
         return any(leg.trade.side == side for leg in self.open_legs)
