@@ -142,8 +142,11 @@ class TrappedLongFlushShort:
         self.pending_signal = None
         return sig
 
-    def describe(self):
+    def describe(self, current_price: float = None):
         """현재 상태를 사람이 읽을 텍스트로 설명 (GUI/텔레그램 표시용).
+
+        current_price: 제공하면 BREAKOUT 상태의 돌파 고점 표시가 확정봉 사이에도
+        라이브로 갱신된다(체결 틱이 새 고점을 만들면 즉시 반영).
 
         반환: (설명 텍스트, 참고 가격 또는 None).
         """
@@ -156,10 +159,11 @@ class TrappedLongFlushShort:
                 None,
             )
         if self.state == "BREAKOUT":
+            eff_high = max(self.sweep_high, current_price) if current_price is not None else self.sweep_high
             return (
-                f"상단 돌파 감지(고점 {self.sweep_high:,.1f}) — OI 유입 확인 중. 박스 상단 아래로 "
+                f"상단 돌파 감지(고점 {eff_high:,.1f}) — OI 유입 확인 중. 박스 상단 아래로 "
                 f"복귀하면 트랩 확정(1차 진입), 재탈환 성공 시 숏커버로 분류해 취소",
-                self.sweep_high,
+                eff_high,
             )
         if self.state == "TRAP_CONFIRMED":
             return (
@@ -169,8 +173,12 @@ class TrappedLongFlushShort:
             )
         return self.state, None
 
-    def conditions(self, now_ts: float):
-        """T1~T3 하위 조건 각각의 실시간 충족 여부 (GUI 체크리스트 표시용).
+    def conditions(self, now_ts: float, current_price: float = None):
+        """T1~T3 하위 조건 각각의 실시간 충족 여부 (GUI/텔레그램 체크리스트 표시용).
+
+        current_price: 제공하면 IDLE의 "상단까지 거리"/BREAKOUT의 돌파 고점이
+        확정봉 사이에도 매초 라이브로 갱신된다. OI 관련 조건(T1_oi/T3)은 OI
+        자체가 5분 단위 데이터라 틱 단위로 세분화할 수 없어 항상 마지막 확정치를 쓴다.
 
         상태 단계와 무관하게 항상 전부 계산한다. 반환: [{"key","label","met","detail"}, ...] (4개 고정).
         """
@@ -178,12 +186,22 @@ class TrappedLongFlushShort:
         out = []
 
         breakout_happened = self.sweep_high is not None
+        eff_high = max(self.sweep_high, current_price) if (breakout_happened and current_price is not None) else self.sweep_high
+        if breakout_happened:
+            detail = f"고점 {eff_high:,.1f}"
+        elif self.box_high is not None:
+            if current_price is not None:
+                gap_pct = (current_price - self.box_high) / self.box_high * 100
+                detail = f"상단 {self.box_high:,.1f} 대비 {gap_pct:+.2f}%"
+            else:
+                detail = f"상단 {self.box_high:,.1f} 대기"
+        else:
+            detail = "박스 미형성"
         out.append({
             "key": "t1_breakout",
             "label": "T1: 박스 상단 돌파",
             "met": breakout_happened,
-            "detail": (f"고점 {self.sweep_high:,.1f}" if breakout_happened
-                       else (f"상단 {self.box_high:,.1f} 대기" if self.box_high is not None else "박스 미형성")),
+            "detail": detail,
         })
 
         if self.oi_at_breakout and self.oi_peak is not None:
