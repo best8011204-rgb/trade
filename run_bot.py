@@ -11,11 +11,16 @@ REST로 과거 일봉/5분봉/1분봉/OI를 재생해 계층형 박스(일봉 �
 웹소켓이 확정봉을 놓쳐도 1분마다 REST로 보정하는 폴백도 GUI 경로와 동일하게
 동작한다.
 
-[Setup A 예외] run_all.py(로컬 GUI, 한국 리전 — forceOrder 지역 차단 추정)와
-달리, 여기서는 Setup A가 setup_a_legacy.py의 forceOrder(청산 틱) 기반 원본
-구현을 쓴다 — run_bot.py가 실제로 돌아가는 VPS에서는 forceOrder가 정상
-수신될 수 있어서다. 캔들+거래량+OI만 쓰는 setup_a.py 버전은 run_all.py
-전용이며, 두 경로의 Setup A 트리거 조건/파라미터가 서로 다르다는 뜻이다.
+[Setup A 예외] run_all.py와 달리 여기서는 Setup A가 setup_a_legacy.py의
+forceOrder(청산 틱) 기반 원본 구현을 쓴다. (당초 "지역 차단" 때문에 forceOrder가
+전혀 안 온다고 알고 있었으나, 실제 원인은 Binance가 2026-04-23부로 레거시
+wss://fstream.binance.com/stream 을 public/market/private로 분리하면서
+forceOrder/aggTrade/kline["market" 카테고리 전부]가 레거시 URL에서 조용히
+끊긴 것이었다 — live_feed.py의 STREAM_URL을 /market/stream으로 이전해 해결.
+이 fix는 run_all.py도 함께 쓰는 공용 코드라 지금은 두 경로 모두 forceOrder를
+받을 수 있다. Setup A 구현이 여전히 갈라져 있는 건 순전히 "run_bot.py엔
+청산틱 기반, run_all.py엔 캔들+OI 기반을 쓰겠다"는 선택 때문이며, 데이터
+가용성 문제가 아니다.)
 
 GUI까지 같이 보려면 이 파일 대신 `python3 run_all.py` 를 실행하면 된다 —
 run_all 이 GUI + 전략 엔진 + 텔레그램 봇을 한 프로세스에서 모두 구동한다.
@@ -62,11 +67,12 @@ async def main_async(cfg):
     else:
         print("[telegram] 토큰 없음 — 텔레그램 기능 비활성", file=sys.stderr)
 
-    # Setup A: run_all.py(로컬 GUI, 한국 리전 — forceOrder 지역 차단 추정)는
-    # setup_a.py의 재설계된(캔들+거래량+OI, forceOrder 불필요) 버전을 그대로
-    # 쓰지만, run_bot.py는 실제로 forceOrder가 정상 수신될 가능성이 있는
-    # VPS에서 돌아가므로 원래(재설계 전) forceOrder 기반 구현을 되살려 쓴다 —
+    # Setup A: run_bot.py는 setup_a_legacy.py의 forceOrder(청산 틱) 기반 원본
+    # 구현을 쓴다(run_all.py는 여전히 setup_a.py의 캔들+거래량+OI 버전).
     # a_impl로 주입하면 engine.py가 이 구현을 그대로 Setup A 자리에 꽂는다.
+    # forceOrder 자체는 live_feed.py의 STREAM_URL을 /market 엔드포인트로
+    # 이전한 뒤로 두 경로 모두 정상 수신된다(예전엔 레거시 URL 마이그레이션
+    # 문제로 지역 무관하게 안 들어왔었다).
     a_impl = LegacyCascadeExhaustionLong(LegacyCascadeAParams())
 
     runner = LiveTradingRunner(

@@ -1,11 +1,17 @@
 """Setup A(레거시) — forceOrder(청산 틱) 기반 캐스케이드 소진 롱.
 
-[배경] setup_a.py는 한국 리전에서 fstream.binance.com의 forceOrder 프레임이
-안 들어오는 문제(지역 차단 추정) 때문에 캔들+거래량+OI만으로 재설계됐다
-(커밋 793c94e). 하지만 run_bot.py가 실제로 돌아가는 VPS(Oracle Cloud 등,
-한국 리전이 아님)에서는 forceOrder가 정상 수신될 수 있어, 원래(재설계 전)
-forceOrder 기반 구현을 run_bot.py 전용으로 되살린다 — run_all.py(로컬
-GUI)는 setup_a.py의 재설계된 버전을 그대로 쓴다(이 파일과 무관).
+[배경] setup_a.py는 fstream.binance.com의 forceOrder 프레임이 안 들어오는
+문제(당시 지역 차단으로 추정) 때문에 캔들+거래량+OI만으로 재설계됐다(커밋
+793c94e). 나중에 실제 원인이 밝혀졌는데 — Binance가 2026-04-23부로 레거시
+wss://fstream.binance.com/stream 을 public/market/private 세 엔드포인트로
+분리하면서, forceOrder를 포함한 "market" 카테고리 스트림 전체가 레거시
+URL에서 조용히 끊긴 것이었다(지역과 무관). live_feed.py의 STREAM_URL을
+/market/stream으로 이전해 이 문제 자체는 해결됐고, 지금은 run_all.py/
+run_bot.py 둘 다 forceOrder를 정상 수신한다.
+
+그럼에도 이 파일을 run_bot.py 전용으로 유지하는 건 데이터 가용성 때문이
+아니라 순수한 선택이다 — run_bot.py는 forceOrder(청산 틱) 기반 원본
+구현을, run_all.py는 setup_a.py의 캔들+거래량+OI 재설계 버전을 그대로 쓴다.
 
 로직은 793c94e 이전 커밋의 setup_a.py를 그대로 가져온 것이다(T1: 60초 내
 SELL청산 합계가 최근 24시간 시간당 평균×배율 이상 & 최소 연쇄건수 이상,

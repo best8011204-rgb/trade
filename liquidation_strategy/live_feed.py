@@ -41,7 +41,12 @@ from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams, HierarchicalBoxBuilder
 from .report import build_report
 
-STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
+STREAM_URL = "wss://fstream.binance.com/market/stream?streams={streams}"
+# 2026-04-23부로 Binance가 레거시 wss://fstream.binance.com/stream 를
+# public/market/private 세 엔드포인트로 분리했다. forceOrder/aggTrade/kline은
+# 전부 "market" 카테고리라, 레거시 URL로는 핸드셰이크는 되지만 이 스트림들이
+# 조용히 하나도 안 들어온다(지역 차단처럼 보이지만 실제로는 URL 마이그레이션
+# 문제였다 — /market/ws/btcusdt@forceOrder 단독 테스트로 실제 데이터 수신 확인).
 SYMBOL = "btcusdt"
 KLINE_INTERVALS = ("1m", "5m", "1h", "1d")   # 1m=엔진+차트, 나머지=차트 전용
 OI_POLL_S = 300              # 5분
