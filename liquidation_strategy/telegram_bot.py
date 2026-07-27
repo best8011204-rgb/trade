@@ -381,7 +381,10 @@ class CommandHandler:
 
     def _pnl(self):
         s = self.runner.engine.summary()
-        if not s:
+        cs = self.c_runner.summary() if self.c_runner is not None else {}
+        total = sum((s.get(k) or {}).get("count", 0) for k in ("A", "B"))
+        total += sum((cs.get(k) or {}).get("count", 0) for k in ("C1", "C2"))
+        if total == 0:
             return "청산된 트레이드가 아직 없습니다."
         lines = []
         for setup in ("A", "B"):
@@ -394,16 +397,47 @@ class CommandHandler:
                 f"평균 {st['avg_bps']:+.1f}bps · 평균R {st['avg_r']:+.2f} · "
                 f"최대연속손실 {st['max_consec_losses']}회"
             )
+        if self.c_runner is not None:
+            for setup in ("C1", "C2"):
+                st = cs.get(setup) or {}
+                if not st.get("count"):
+                    lines.append(f"Setup {setup}: 0건")
+                    continue
+                lines.append(
+                    f"Setup {setup}: {st['count']}건 · 승률 {st['win_rate']*100:.1f}% · "
+                    f"평균 {st['avg_bps']:+.1f}bps · 평균R {st['avg_r']:+.2f}"
+                )
         return "\n".join(lines)
 
+    def _all_closed_trades(self) -> list:
+        """엔진(A/B)의 Trade 객체와 Setup C(c_runner)의 dict 트레이드를
+        exit_ts 기준으로 합쳐 정렬한 공통 포맷(dict) 리스트로 반환한다 —
+        /trades가 셋업 구분 없이 최근 체결을 시간순으로 보여주기 위함."""
+        out = []
+        for t in self.runner.engine.closed_trades:
+            out.append({
+                "tag": t.tag, "side": t.side.value, "reason": t.reason,
+                "entry_price": t.entry_price, "exit_price": t.exit_price,
+                "exit_ts": t.exit_ts, "bps": t.bps,
+            })
+        if self.c_runner is not None:
+            for t in self.c_runner.closed_trades:
+                out.append({
+                    "tag": t["tag"], "side": t["side"], "reason": t["reason"],
+                    "entry_price": t["entry_price"], "exit_price": t["exit_price"],
+                    "exit_ts": t["exit_ts"], "bps": t["bps"],
+                })
+        out.sort(key=lambda t: t["exit_ts"])
+        return out
+
     def _trades(self, n):
-        trades = self.runner.engine.closed_trades[-n:]
+        trades = self._all_closed_trades()[-n:]
         if not trades:
             return "청산된 트레이드가 아직 없습니다."
         lines = []
         for t in trades:
-            lines.append(f"{t.tag} {t.side.value} {t.reason} | 진입 {t.entry_price:,.1f} → "
-                         f"청산 {t.exit_price:,.1f} | {t.bps:+.1f}bps")
+            lines.append(f"{t['tag']} {t['side']} {t['reason']} | 진입 {t['entry_price']:,.1f} → "
+                         f"청산 {t['exit_price']:,.1f} | {t['bps']:+.1f}bps")
         return "\n".join(lines)
 
     def _params_obj(self, setup: str):
