@@ -38,7 +38,7 @@ from . import binance_client as bc
 from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
-from .setup_b import CascadeBParams
+from .setup_b import CascadeBParams, DailyBoxRegime
 from .report import build_report
 
 STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
@@ -59,6 +59,11 @@ class LiveShadowRunner:
 
         self.engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams())
         self.candles = deque(maxlen=CANDLE_HISTORY_MAX)
+        # 계층형 박스: 5분봉 120개(최근 12개 제외)로 실제 box_low/high를 뽑고,
+        # 일봉 90일 레인지 압축 게이트가 "돌파 구간"이라 판단하면 박스 자체를
+        # 없앤다(clear_box) — Setup B 신규 트리거 탐지가 자동으로 멈춘다.
+        self.candles_5m = deque(maxlen=200)
+        self.daily_regime = DailyBoxRegime()
         self.cvd_accum = 0.0
         self._n_closed_seen = 0
         self._a_log_seen = 0
@@ -116,6 +121,14 @@ class LiveShadowRunner:
             "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]),
             "closed": closed,
         }
+        if interval == "1d" and closed:
+            self.daily_regime.on_daily_candle(candle_dict["ts"], candle_dict["high"],
+                                               candle_dict["low"], candle_dict["close"])
+
+        if interval == "5m" and closed:
+            self.candles_5m.append(candle_dict)
+            self._update_5m_box()
+
         if interval == "1m" and closed:
             c = Candle(ts=candle_dict["ts"], open=candle_dict["open"], high=candle_dict["high"],
                        low=candle_dict["low"], close=candle_dict["close"],
@@ -123,18 +136,6 @@ class LiveShadowRunner:
             self.engine.a.on_cvd_delta(c.ts, self.cvd_accum)
             self.cvd_accum = 0.0
 
-            # 박스(직전 box_window_min분 레인지, Setup B 파라미터로 /set 가능)는
-            # "이번 확정봉 이전"까지의 히스토리로 계산해야 한다. 이번 봉을 포함해서
-            # 계산하면, 이번 봉이 새 극값을 만드는 순간 그 값이 즉시 박스 경계
-            # 자체가 되어버려 "이번 봉이 박스를 돌파했는가"가 자기 자신과 비교하는
-            # 꼴이 되어 항상 False가 나온다 — 실제로 박스 하단/상단을 찍은 바로 그
-            # 봉에서는 돌파가 감지되지 않고, 그 다음 봉이 한 번 더 그 값을 넘어야만
-            # 감지되는 버그가 있었다.
-            if self.candles:
-                window = list(self.candles)[-self.engine.b.p.box_window_min:]
-                box_low = min(x.low for x in window)
-                box_high = max(x.high for x in window)
-                self.engine.set_box(box_low, box_high)
             self.engine.on_candle(c, oi_now=self._latest_oi)
 
             self.candles.append(c)
@@ -145,6 +146,27 @@ class LiveShadowRunner:
                 self.on_display_candle(interval, candle_dict)
             except Exception as e:  # 표시 훅 오류가 엔진을 죽이면 안 된다
                 print(f"[display_hook] error: {e}", file=sys.stderr)
+
+    def _update_5m_box(self):
+        """실제 박스(box_low/high)는 5분봉 120개 중 최근 12개를 뺀
+        120~13번째 구간(과거 확정 구간)으로만 계산한다. 일봉 90일 레인지
+        압축 게이트(daily_regime)가 "돌파 구간"이라 판단하면 박스 자체가
+        존재하지 않는 것으로 취급한다(clear_box) — 새 구간이 형성되지 않은
+        상태이므로 Setup B의 신규 트리거 탐지를 자동으로 멈춘다."""
+        p = self.engine.b.p
+        n = len(self.candles_5m)
+        end = n - p.box_5m_exclude_recent
+        start = end - p.box_5m_bars
+        if start < 0 or end <= start:
+            self.engine.clear_box()
+            return
+        window = list(self.candles_5m)[start:end]
+        box_low = min(x["low"] for x in window)
+        box_high = max(x["high"] for x in window)
+        if self.daily_regime.is_range_regime(p):
+            self.engine.set_box(box_low, box_high)
+        else:
+            self.engine.clear_box()
 
     _latest_oi = None
 
