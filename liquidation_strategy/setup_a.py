@@ -1,160 +1,306 @@
 """Setup A — 청산 캐스케이드 소진 롱 (Cascade Exhaustion Long)
 
-명세서 1장의 트리거(T1~T4)·실행 규칙을 순서대로 구현한 이벤트 기반 상태 머신.
-스트리밍 데이터(ForceOrder, Candle)를 시간순으로 하나씩 `on_force_order` /
-`on_candle` 에 흘려 넣으면 내부적으로 캐스케이드를 추적하고, 소진 확인 시
-`pending_signal` 에 진입 신호를 채운다.
+[재설계] forceOrder(청산 틱) 없이 캔들 + 거래량 + OI만으로 동작한다.
+이론적 근거는 setup_c.py의 Price x OI 상태 분류기와 동일: 가격 하락이
+디레버리징(청산)인지 신규 숏(추세)인지는 OI로만 구분되고, 급격한 OI
+하락은 청산 캐스케이드의 집계 발자국이다. forceOrder 틱을 직접 못 봐도
+그 결과로 나타나는 "가격 급락 + OI 급감 + 거래량 폭증"은 캔들 스트림만으로
+탐지 가능하다 — 이게 이 모듈이 지역 차단 등으로 forceOrder가 전혀 안 들어와도
+정상 작동하는 이유다.
+
+트리거 구조(T1~T4)는 원래 명세와 동일하게 유지하되, 데이터 소스만 교체했다:
+  T1(캐스케이드 감지): 60~180초 창의 가격하락이 ATR의 N배 이상
+                       & DeltaOI%가 최근 분포 하위 q% & RVOL이 상위 q%
+                       (구: 60초 SELL청산 합계 >= 시간당평균*N & 최소 연쇄건수)
+  T2(가격이탈 확인):   캐스케이드 시작 대비 추가 하락률 (변경 없음 — 원래도 캔들 기반)
+  T3(소진 확인):       OI 감속(2차미분 부호전환) + 반전캔들(CLV/윅비대칭)
+                       + CVD 양전환 + 반등 유지
+                       (구: 무청산 경과시간 -> OI 감속 확인으로 대체.
+                        CVD/반등은 원래도 forceOrder와 무관했으므로 변경 없음)
+  T4(매크로 블랙아웃): 변경 없음
+
+StrategyEngine과의 계약(state/cascade_id/log/pending_signal/compute_exits/
+describe/conditions/reset/allow_reentry/register_reentry/macro_blackouts)은
+전부 그대로 유지한다 — engine.py는 이 파일의 내부 구현을 몰라도 된다.
 """
 
-from dataclasses import dataclass, field
+import statistics
+from dataclasses import dataclass
 from collections import deque
-from .data_types import ForceOrder, Candle, Trade, Side
+from .data_types import Candle
+
+
+def _quantile(values: list, q: float):
+    """표준 statistics 모듈에 임의 분위수 함수가 없어 직접 구현(선형보간)."""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    if n == 1:
+        return s[0]
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return s[lo] + (s[hi] - s[lo]) * frac
 
 
 @dataclass
 class CascadeAParams:
-    lookback_hours: float = 24.0        # 기준 시간당 평균 산정 구간
-    vol_multiplier: float = 3.0          # T1: 60s 합계 >= 시간당 평균 * N (구 8.0 — 발동 빈도 완화)
-    min_chain: int = 2                   # T1: 최소 연쇄 건수 (구 3)
-    cascade_window_s: float = 60.0       # T1: 감지 윈도우
-    min_move_pct: float = 0.004          # T2: 캐스케이드 시작 대비 하락률 (구 0.008)
-    exhaustion_gap_s: float = 45.0       # T3: 마지막 청산 후 무청산 경과 (구 90)
-    cvd_window_s: float = 60.0           # T3: 1분 CVD
-    rebound_pct: float = 0.0008          # T3: 저점 대비 반등폭 (구 0.0015)
-    rebound_hold_s: float = 15.0         # T3: 반등 유지 시간 (구 30)
-    sl_buffer_pct: float = 0.0015        # 손절 = 저점 - 버퍼
-    tp1_retrace: float = 0.38            # 되돌림 38%
-    tp2_retrace: float = 0.618           # 되돌림 61.8%
-    tp1_fraction: float = 0.5            # TP1에서 청산할 비율
-    time_exit_s: float = 90 * 60         # 시간 청산 (90분)
-    max_reentries: int = 1               # 동일 캐스케이드 재진입 허용 횟수
+    lookback_hours: float = 24.0          # DeltaOI%/RVOL 분포(분위수 게이트) 산정 구간
+    cascade_window_s: float = 180.0       # T1: 가격/OI 변화 관찰 창(구 60초 — 다중 봉 관찰 위해 확장)
+    price_drop_atr_mult: float = 1.5      # T1: 윈도우 하락폭이 ATR의 몇 배 이상이어야 하는가 (구 vol_multiplier 대체)
+    oi_drop_quantile: float = 0.05        # T1: DeltaOI%가 최근 분포 하위 몇 %여야 디레버리징으로 보는가 (구 min_chain 대체)
+    rvol_quantile: float = 0.90           # T1: RVOL이 최근 분포 상위 몇 %여야 강제활동으로 보는가 (신규)
+    rvol_baseline_bars: int = 20          # RVOL 중앙값 기준 창(1분봉 개수)
+    atr_window_bars: int = 14             # ATR 계산 창(1분봉 개수)
+    min_move_pct: float = 0.004           # T2: 캐스케이드 시작 대비 하락률 (변경 없음)
+    cvd_window_s: float = 60.0            # T3: 1분 CVD (변경 없음 — aggTrade 기반, forceOrder 무관)
+    oi_decel_confirm_s: float = 45.0      # T3: OI 감속+반전캔들 유지 시간 (구 exhaustion_gap_s "무청산 경과" 대체)
+    reversal_clv_min: float = 0.7         # T3: 반전 캔들 판정 — CLV 최소치(스케일 없는 비율이라 고정 상수)
+    reversal_wick_ratio_min: float = 1.5  # T3: 반전 캔들 판정 — 하단윅/상단윅 최소 비율
+    rebound_pct: float = 0.0008           # T3: 저점 대비 반등폭 (변경 없음)
+    rebound_hold_s: float = 15.0          # T3: 반등 유지 시간 (변경 없음)
+    sl_buffer_pct: float = 0.0015         # 손절 = 저점 - 버퍼
+    tp1_retrace: float = 0.38             # 되돌림 38%
+    tp2_retrace: float = 0.618            # 되돌림 61.8%
+    tp1_fraction: float = 0.5             # TP1에서 청산할 비율
+    time_exit_s: float = 90 * 60          # 시간 청산 (90분)
+    max_reentries: int = 1                # 동일 캐스케이드 재진입 허용 횟수
 
 
 class CascadeExhaustionLong:
-    """T1~T4 감지 + 포지션 관리 상태 머신."""
+    """T1~T4 감지 + 포지션 관리 상태 머신. 스트리밍(캔들 1건씩) 입력, pandas 무사용
+    (setup_a.py/setup_b.py의 기존 관례 유지 — setup_c.py만 DataFrame 배치 처리)."""
+
+    MIN_DIST_SAMPLES = 30  # 분위수 게이트가 유효하려면 최소 이만큼 표본이 쌓여야 한다
 
     def __init__(self, params: CascadeAParams = None, macro_blackouts=None):
         self.p = params or CascadeAParams()
         # macro_blackouts: [(start_ts, end_ts), ...]  FOMC/CPI ±30분
         self.macro_blackouts = macro_blackouts or []
 
-        self._hourly_baseline = None       # 시간당 평균 청산 금액(외부 주입)
-        self._sell_liqs = deque()          # (ts, notional) 최근 청산 로그
-        self._cvd_buf = deque()            # (ts, delta) 1분 CVD 롤링
+        self._cvd_buf = deque()            # (ts, delta) 1분 CVD 롤링 — forceOrder와 무관, 그대로 유지
+
+        # --- OI+거래량+ATR 프록시용 히스토리 ---
+        self._prev_close = None
+        self._tr_hist = deque()            # true range, 길이<=atr_window_bars
+        self._vol_hist = deque()           # volume, 길이<=rvol_baseline_bars
+        self._close_win = deque()          # (ts, close) — cascade_window_s+버퍼만 유지(하락폭 계산용)
+        self._oi_win = deque()             # (ts, oi) — cascade_window_s+버퍼만 유지(DeltaOI%용)
+        self._oi_chg_dist = deque()        # (ts, oi_chg_now) — lookback_hours 유지, 분위수 게이트용
+        self._rvol_dist = deque()          # (ts, rvol_now) — lookback_hours 유지, 분위수 게이트용
+        self._last_oi_chg_for_decel = None  # OI 감속(2차미분) 판정용 직전 tick 값
 
         self.state = "IDLE"                # IDLE -> CASCADE -> WATCH_EXHAUST -> ARMED
         self.cascade_start_ts = None
         self.cascade_start_price = None
         self.cascade_low = None
         self.cascade_low_ts = None
-        self.last_liq_ts = None
         self.rebound_since_ts = None
         self.reentry_count = 0
         self.cascade_id = 0
+        self._exhaust_confirm_run = 0
 
         self.pending_signal = None         # {"ts", "price", "tag"} 진입 신호
         self.log = []
 
-    def set_hourly_baseline(self, notional_per_hour: float):
-        self._hourly_baseline = notional_per_hour
-
     def _in_macro_blackout(self, ts: float) -> bool:
         return any(s <= ts <= e for s, e in self.macro_blackouts)
 
-    def _prune(self, ts: float):
-        while self._sell_liqs and ts - self._sell_liqs[0][0] > self.p.cascade_window_s:
-            self._sell_liqs.popleft()
-        while self._cvd_buf and ts - self._cvd_buf[0][0] > self.p.cvd_window_s:
-            self._cvd_buf.popleft()
-
     def on_cvd_delta(self, ts: float, delta: float):
         self._cvd_buf.append((ts, delta))
-        self._prune(ts)
+        while self._cvd_buf and ts - self._cvd_buf[0][0] > self.p.cvd_window_s:
+            self._cvd_buf.popleft()
 
     def _cvd_1m(self) -> float:
         return sum(d for _, d in self._cvd_buf)
 
-    def on_force_order(self, fo: ForceOrder):
-        if fo.side != "SELL":
-            return  # 롱 청산(SELL)만 하방 캐스케이드 후보
-        self._prune(fo.ts)
-        self._sell_liqs.append((fo.ts, fo.notional))
-        self.last_liq_ts = fo.ts
+    # ---- 히스토리/피처 -------------------------------------------------
+    @staticmethod
+    def _clv(c: Candle) -> float:
+        rng = c.high - c.low
+        if rng <= 0:
+            return 0.5
+        return (c.close - c.low) / rng
 
-        window_sum = sum(n for _, n in self._sell_liqs)
-        window_count = len(self._sell_liqs)
+    @staticmethod
+    def _wick_ratio(c: Candle, cap: float = 100.0) -> float:
+        body_hi = max(c.open, c.close)
+        body_lo = min(c.open, c.close)
+        lower = max(body_lo - c.low, 0.0)
+        upper = max(c.high - body_hi, 0.0)
+        if upper == 0 and lower == 0:
+            return 1.0
+        if upper == 0:
+            return cap
+        return min(lower / upper, cap)
 
-        if self.state == "IDLE":
-            if (
-                self._hourly_baseline
-                and window_sum >= self._hourly_baseline * self.p.vol_multiplier
-                and window_count >= self.p.min_chain
-            ):
-                self.cascade_id += 1
-                self.state = "CASCADE"
-                self.cascade_start_ts = fo.ts
-                self.cascade_start_price = fo.price
-                self.cascade_low = fo.price
-                self.cascade_low_ts = fo.ts
-                self.reentry_count = 0
-                self.log.append((fo.ts, f"T1 캐스케이드 감지 (id={self.cascade_id}, sum={window_sum:.0f})"))
-        elif self.state in ("CASCADE", "WATCH_EXHAUST"):
-            if fo.price < self.cascade_low:
-                self.cascade_low = fo.price
-                self.cascade_low_ts = fo.ts
-            # 신규 청산 발생 -> 소진 관찰 리셋
+    @staticmethod
+    def _value_at_or_before(ts_val_deque, target_ts):
+        result = None
+        for ts_, val_ in ts_val_deque:
+            if ts_ <= target_ts:
+                result = val_
+            else:
+                break
+        return result
+
+    def _atr(self):
+        if not self._tr_hist:
+            return None
+        return sum(self._tr_hist) / len(self._tr_hist)
+
+    def _rvol_now(self, current_volume):
+        if len(self._vol_hist) < max(5, self.p.rvol_baseline_bars // 2):
+            return None
+        med = statistics.median(self._vol_hist)
+        if med == 0:
+            return None
+        return current_volume / med
+
+    def _oi_change_now(self, now_ts):
+        base_oi = self._value_at_or_before(self._oi_win, now_ts - self.p.cascade_window_s)
+        if base_oi is None or base_oi == 0 or not self._oi_win:
+            return None
+        latest_oi = self._oi_win[-1][1]
+        return (latest_oi - base_oi) / base_oi
+
+    def _price_drop_atr(self, now_ts, now_close):
+        base_close = self._value_at_or_before(self._close_win, now_ts - self.p.cascade_window_s)
+        if base_close is None:
+            return None, None
+        atr_now = self._atr()
+        if not atr_now:
+            return None, None
+        return (base_close - now_close) / atr_now, base_close
+
+    def _quantile_gate(self, dist_deque, q):
+        vals = [v for _, v in dist_deque]
+        if len(vals) < self.MIN_DIST_SAMPLES:
+            return None
+        return _quantile(vals, q)
+
+    def _update_history(self, c: Candle, oi_now):
+        p = self.p
+        if self._prev_close is not None:
+            tr = max(c.high - c.low, abs(c.high - self._prev_close), abs(c.low - self._prev_close))
+            self._tr_hist.append(tr)
+            if len(self._tr_hist) > p.atr_window_bars:
+                self._tr_hist.popleft()
+        self._prev_close = c.close
+
+        self._vol_hist.append(c.volume)
+        if len(self._vol_hist) > p.rvol_baseline_bars:
+            self._vol_hist.popleft()
+
+        self._close_win.append((c.ts, c.close))
+        while self._close_win and c.ts - self._close_win[0][0] > p.cascade_window_s + 60:
+            self._close_win.popleft()
+
+        if oi_now is not None:
+            self._oi_win.append((c.ts, oi_now))
+        while self._oi_win and c.ts - self._oi_win[0][0] > p.cascade_window_s + 300:
+            self._oi_win.popleft()
+
+        lookback_s = p.lookback_hours * 3600.0
+        oi_chg_now = self._oi_change_now(c.ts)
+        if oi_chg_now is not None:
+            self._oi_chg_dist.append((c.ts, oi_chg_now))
+        while self._oi_chg_dist and c.ts - self._oi_chg_dist[0][0] > lookback_s:
+            self._oi_chg_dist.popleft()
+
+        rvol_now = self._rvol_now(c.volume)
+        if rvol_now is not None:
+            self._rvol_dist.append((c.ts, rvol_now))
+        while self._rvol_dist and c.ts - self._rvol_dist[0][0] > lookback_s:
+            self._rvol_dist.popleft()
+
+    # ---- 트리거 판정 ----------------------------------------------------
+    def _check_t1(self, c: Candle):
+        drop_atr, base_close = self._price_drop_atr(c.ts, c.close)
+        oi_chg_now = self._oi_change_now(c.ts)
+        rvol_now = self._rvol_now(c.volume)
+        oi_gate = self._quantile_gate(self._oi_chg_dist, self.p.oi_drop_quantile)
+        rvol_gate = self._quantile_gate(self._rvol_dist, self.p.rvol_quantile)
+
+        if (drop_atr is not None and drop_atr >= self.p.price_drop_atr_mult
+                and oi_chg_now is not None and oi_gate is not None and oi_chg_now <= oi_gate
+                and rvol_now is not None and rvol_gate is not None and rvol_now >= rvol_gate):
+            self.cascade_id += 1
             self.state = "CASCADE"
+            self.cascade_start_ts = c.ts
+            self.cascade_start_price = base_close
+            self.cascade_low = min(base_close, c.close)
+            self.cascade_low_ts = c.ts
+            self.reentry_count = 0
+            self._exhaust_confirm_run = 0
+            self.log.append((c.ts, f"T1 캐스케이드 감지 (id={self.cascade_id}, "
+                                    f"하락={drop_atr:.2f}xATR, dOI={oi_chg_now*100:.2f}%, RVOL={rvol_now:.2f})"))
+
+    def _check_t3(self, c: Candle):
+        p = self.p
+        oi_chg_now = self._oi_change_now(c.ts)
+        oi_decel_ok = False
+        if oi_chg_now is not None and self._last_oi_chg_for_decel is not None:
+            oi_decel_ok = (oi_chg_now - self._last_oi_chg_for_decel) > 0  # 하락 속도 감속(2차미분 부호전환)
+        if oi_chg_now is not None:
+            self._last_oi_chg_for_decel = oi_chg_now
+
+        reversal_ok = (self._clv(c) >= p.reversal_clv_min
+                       and self._wick_ratio(c) >= p.reversal_wick_ratio_min)
+
+        if oi_decel_ok and reversal_ok:
+            self._exhaust_confirm_run += 1
+        else:
+            self._exhaust_confirm_run = 0
+        decel_hold_ok = self._exhaust_confirm_run * 60.0 >= p.oi_decel_confirm_s  # 1분봉 가정
+
+        cvd_ok = self._cvd_1m() >= 0
+        rebound_pct_now = (c.close - self.cascade_low) / self.cascade_low
+        if rebound_pct_now >= p.rebound_pct:
+            if self.rebound_since_ts is None:
+                self.rebound_since_ts = c.ts
+        else:
             self.rebound_since_ts = None
+        rebound_hold_ok = (
+            self.rebound_since_ts is not None
+            and (c.ts - self.rebound_since_ts) >= p.rebound_hold_s
+        )
 
-            move = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price
-            if move >= self.p.min_move_pct:
-                self.state = "WATCH_EXHAUST"
-                self.log.append((fo.ts, f"T2 가격이탈 확인 move={move*100:.2f}%"))
+        if decel_hold_ok and cvd_ok and rebound_hold_ok:
+            if self._in_macro_blackout(c.ts):
+                self.log.append((c.ts, "T4 매크로 블랙아웃 - 진입 차단"))
+                self.state = "IDLE"
+                return
+            self.pending_signal = {
+                "ts": c.ts,
+                "price": c.close,
+                "cascade_low": self.cascade_low,
+                "cascade_start_price": self.cascade_start_price,
+                "tag": f"A-{self.cascade_id}",
+            }
+            self.log.append((c.ts, f"T3 소진 확인 -> 진입 신호 @ {c.close:.1f}"))
+            self.state = "ARMED"
 
-    def on_candle(self, c: Candle):
-        """가격/CVD 스트림 tick. T2 재평가(캔들 저가 기준)와 T3 소진 판정,
-        열린 포지션 관리가 여기서 이뤄진다."""
+    def on_candle(self, c: Candle, oi_now: float = None):
+        """가격/거래량/OI 스트림 tick. T1(신규 진입 감지)·T2(가격이탈 재평가)·
+        T3(소진 판정)가 전부 여기서 이뤄진다 — forceOrder 불필요."""
+        self._update_history(c, oi_now)
+
         if self.state in ("CASCADE", "WATCH_EXHAUST"):
-            # forceOrder는 1000ms당 대표 1건만 전송되므로(명세 4장 주의),
-            # 캔들 저가로도 캐스케이드 저점/T2를 갱신해야 짧은 캐스케이드를 놓치지 않는다.
             if c.low < self.cascade_low:
                 self.cascade_low = c.low
                 self.cascade_low_ts = c.ts
             move = (self.cascade_start_price - self.cascade_low) / self.cascade_start_price
             if self.state == "CASCADE" and move >= self.p.min_move_pct:
                 self.state = "WATCH_EXHAUST"
-                self.log.append((c.ts, f"T2 가격이탈 확인(캔들) move={move*100:.2f}%"))
+                self.log.append((c.ts, f"T2 가격이탈 확인 move={move*100:.2f}%"))
 
-        if self.state == "WATCH_EXHAUST" and self.last_liq_ts is not None:
-            gap_ok = (c.ts - self.last_liq_ts) >= self.p.exhaustion_gap_s
-            cvd_ok = self._cvd_1m() >= 0
-            rebound_pct_now = (c.close - self.cascade_low) / self.cascade_low
-
-            if rebound_pct_now >= self.p.rebound_pct:
-                if self.rebound_since_ts is None:
-                    self.rebound_since_ts = c.ts
-            else:
-                self.rebound_since_ts = None
-
-            rebound_hold_ok = (
-                self.rebound_since_ts is not None
-                and (c.ts - self.rebound_since_ts) >= self.p.rebound_hold_s
-            )
-
-            if gap_ok and cvd_ok and rebound_hold_ok:
-                if self._in_macro_blackout(c.ts):
-                    self.log.append((c.ts, "T4 매크로 블랙아웃 - 진입 차단"))
-                    self.state = "IDLE"
-                    return
-                self.pending_signal = {
-                    "ts": c.ts,
-                    "price": c.close,
-                    "cascade_low": self.cascade_low,
-                    "cascade_start_price": self.cascade_start_price,
-                    "tag": f"A-{self.cascade_id}",
-                }
-                self.log.append((c.ts, f"T3 소진 확인 -> 진입 신호 @ {c.close:.1f}"))
-                self.state = "ARMED"
+        if self.state == "IDLE":
+            self._check_t1(c)
+        elif self.state == "WATCH_EXHAUST":
+            self._check_t3(c)
 
     def consume_signal(self):
         sig = self.pending_signal
@@ -170,8 +316,9 @@ class CascadeExhaustionLong:
         p = self.p
         if self.state == "IDLE":
             return (
-                f"청산 캐스케이드 대기 중 — 60초 내 SELL청산 합계가 "
-                f"시간당평균×{p.vol_multiplier:.1f} 이상 & {p.min_chain}건 이상 발생하면 추적 시작",
+                f"청산 캐스케이드 대기 중 — {p.cascade_window_s:.0f}초 내 가격하락 ≥ ATR×{p.price_drop_atr_mult:.1f} "
+                f"& DeltaOI 하위{p.oi_drop_quantile*100:.0f}% & RVOL 상위{(1-p.rvol_quantile)*100:.0f}% "
+                "충족 시 추적 시작",
                 None,
             )
         if self.state == "CASCADE":
@@ -186,45 +333,42 @@ class CascadeExhaustionLong:
         if self.state == "WATCH_EXHAUST":
             return (
                 f"하락 소진 확인 중 — 저점 {self.cascade_low:,.1f} 대비 +{p.rebound_pct*100:.2f}% 반등이 "
-                f"{p.rebound_hold_s:.0f}초 유지 + 무청산 {p.exhaustion_gap_s:.0f}초 경과 + CVD 양전환 시 매수 진입",
+                f"{p.rebound_hold_s:.0f}초 유지 + OI 감속·반전캔들 {p.oi_decel_confirm_s:.0f}초 + CVD 양전환 시 매수 진입",
                 self.cascade_low,
             )
         if self.state == "ARMED":
             return "진입 신호 발생 — 체결 대기 중", self.cascade_low
         return self.state, None
 
-    def _window_stats(self, now_ts: float):
-        """now_ts 기준으로 60초 청산 윈도우를 다시 계산한다 (상태를 바꾸지
-        않는 읽기 전용 조회 — 표시용으로 정확한 실시간 값을 주기 위함,
-        _sell_liqs 자체는 on_force_order가 들어올 때만 정리되므로 그 사이엔
-        오래된 값이 남아있을 수 있다)."""
-        cutoff = now_ts - self.p.cascade_window_s
-        items = [n for ts, n in self._sell_liqs if ts >= cutoff]
-        return sum(items), len(items)
-
     def conditions(self, now_ts: float):
         """T1~T4 하위 조건 각각의 실시간 충족 여부 (GUI 체크리스트 표시용).
 
-        상태 단계와 무관하게 항상 전부 계산한다 — 예를 들어 IDLE이어도 T1의
-        진행 상황을, WATCH_EXHAUST에서도 T1/T2는 이미 충족된 값 그대로 보여준다.
-        반환: [{"key", "label", "met": bool, "detail": str}, ...] (7개 고정).
+        상태 단계와 무관하게 항상 전부 계산한다. 반환: [{"key","label","met","detail"}, ...] (8개 고정).
         """
         p = self.p
         out = []
 
-        window_sum, window_count = self._window_stats(now_ts)
-        threshold = self._hourly_baseline * p.vol_multiplier if self._hourly_baseline else None
+        now_close = self._prev_close if self._prev_close is not None else 0.0
+        drop_atr, _ = self._price_drop_atr(now_ts, now_close)
+        oi_chg_now = self._oi_change_now(now_ts)
+        rvol_now = self._rvol_now(self._vol_hist[-1]) if self._vol_hist else None
+        oi_gate = self._quantile_gate(self._oi_chg_dist, p.oi_drop_quantile)
+        rvol_gate = self._quantile_gate(self._rvol_dist, p.rvol_quantile)
+
         out.append({
-            "key": "t1_vol",
-            "label": f"T1: 60초 청산합계 ≥ 기준×{p.vol_multiplier:.1f}",
-            "met": threshold is not None and window_sum >= threshold,
-            "detail": f"{window_sum:,.0f} / {threshold:,.0f}" if threshold else f"{window_sum:,.0f} / 기준선 대기중",
+            "key": "t1_drop", "label": f"T1: {p.cascade_window_s:.0f}초 하락 ≥ ATR×{p.price_drop_atr_mult:.1f}",
+            "met": bool(drop_atr is not None and drop_atr >= p.price_drop_atr_mult),
+            "detail": f"{drop_atr:.2f}x" if drop_atr is not None else "계산불가",
         })
         out.append({
-            "key": "t1_chain",
-            "label": f"T1: 최소 연쇄 {p.min_chain}건",
-            "met": window_count >= p.min_chain,
-            "detail": f"{window_count}건",
+            "key": "t1_oi", "label": f"T1: DeltaOI 하위{p.oi_drop_quantile*100:.0f}%",
+            "met": bool(oi_chg_now is not None and oi_gate is not None and oi_chg_now <= oi_gate),
+            "detail": f"{oi_chg_now*100:.2f}%" if oi_chg_now is not None else "N/A",
+        })
+        out.append({
+            "key": "t1_rvol", "label": f"T1: RVOL 상위{(1-p.rvol_quantile)*100:.0f}%",
+            "met": bool(rvol_now is not None and rvol_gate is not None and rvol_now >= rvol_gate),
+            "detail": f"{rvol_now:.2f}" if rvol_now is not None else "N/A",
         })
 
         if self.cascade_start_price and self.cascade_low is not None:
@@ -232,39 +376,31 @@ class CascadeExhaustionLong:
         else:
             move_pct = 0.0
         out.append({
-            "key": "t2_move",
-            "label": f"T2: 하락률 ≥ {p.min_move_pct*100:.2f}%",
+            "key": "t2_move", "label": f"T2: 하락률 ≥ {p.min_move_pct*100:.2f}%",
             "met": move_pct >= p.min_move_pct,
             "detail": f"{move_pct*100:.2f}%",
         })
 
-        gap = (now_ts - self.last_liq_ts) if self.last_liq_ts is not None else None
         out.append({
-            "key": "t3_gap",
-            "label": f"T3: 무청산 경과 ≥ {p.exhaustion_gap_s:.0f}초",
-            "met": gap is not None and gap >= p.exhaustion_gap_s,
-            "detail": f"{gap:.0f}초 경과" if gap is not None else "청산 이력 없음",
+            "key": "t3_oi_decel", "label": f"T3: OI감속+반전캔들 {p.oi_decel_confirm_s:.0f}초 유지",
+            "met": self._exhaust_confirm_run * 60.0 >= p.oi_decel_confirm_s,
+            "detail": f"{self._exhaust_confirm_run}봉 연속" if self._exhaust_confirm_run else "미확인",
         })
         cvd = self._cvd_1m()
         out.append({
-            "key": "t3_cvd",
-            "label": "T3: 1분 CVD ≥ 0",
-            "met": cvd >= 0,
-            "detail": f"{cvd:+.2f}",
+            "key": "t3_cvd", "label": "T3: 1분 CVD ≥ 0",
+            "met": cvd >= 0, "detail": f"{cvd:+.2f}",
         })
         hold = (now_ts - self.rebound_since_ts) if self.rebound_since_ts is not None else 0.0
         out.append({
-            "key": "t3_rebound",
-            "label": f"T3: 반등 {p.rebound_pct*100:.2f}% 유지 ≥ {p.rebound_hold_s:.0f}초",
+            "key": "t3_rebound", "label": f"T3: 반등 {p.rebound_pct*100:.2f}% 유지 ≥ {p.rebound_hold_s:.0f}초",
             "met": self.rebound_since_ts is not None and hold >= p.rebound_hold_s,
             "detail": f"{hold:.0f}초 유지 중" if self.rebound_since_ts is not None else "반등 미확인",
         })
         blackout = self._in_macro_blackout(now_ts)
         out.append({
-            "key": "t4_macro",
-            "label": "T4: 매크로 블랙아웃 아님",
-            "met": not blackout,
-            "detail": "차단 구간" if blackout else "정상",
+            "key": "t4_macro", "label": "T4: 매크로 블랙아웃 아님",
+            "met": not blackout, "detail": "차단 구간" if blackout else "정상",
         })
         return out
 
@@ -275,12 +411,14 @@ class CascadeExhaustionLong:
         self.reentry_count += 1
         self.state = "WATCH_EXHAUST"
         self.rebound_since_ts = None
+        self._exhaust_confirm_run = 0
 
     def reset(self):
         """탐지 상태만 IDLE로 되돌린다. cascade_low/start_price 등은 재진입
         판단(register_reentry)에 쓰일 수 있으므로 남겨둔다."""
         self.state = "IDLE"
         self.rebound_since_ts = None
+        self._exhaust_confirm_run = 0
 
     @staticmethod
     def compute_exits(entry_price: float, cascade_low: float, cascade_start_price: float, p: CascadeAParams):

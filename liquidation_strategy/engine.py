@@ -6,7 +6,7 @@
 """
 
 from dataclasses import dataclass, field
-from .data_types import Trade, Side, Candle, ForceOrder, OIPoint
+from .data_types import Trade, Side, Candle, OIPoint
 from .setup_a import CascadeExhaustionLong, CascadeAParams
 from .setup_b import TrappedLongFlushShort, CascadeBParams
 
@@ -60,18 +60,6 @@ class StrategyEngine:
     def _has_setup(self, setup: str) -> bool:
         return any(leg.trade.setup == setup for leg in self.open_legs)
 
-    def on_force_order(self, fo: ForceOrder):
-        if not self.a_enabled:
-            return
-        was_idle = self.a.state == "IDLE"
-        self.a.on_force_order(fo)
-        # A 트리거(T1)가 새로 발생 && B 포지션 보유 중이면 B의 TP2를 동적 전환
-        if was_idle and self.a.state == "CASCADE" and self._has_setup("B"):
-            for leg in self.open_legs:
-                if leg.trade.setup == "B":
-                    leg.tp2 = fo.price  # 청산 캐스케이드 발생 지점을 TP2로 재설정
-                    self.b.log.append((fo.ts, f"A트리거 발생 -> B TP2를 {fo.price:.1f}로 동적 전환"))
-
     def on_oi(self, pt: OIPoint):
         if self.b_enabled:
             self.b.on_oi(pt)
@@ -79,7 +67,14 @@ class StrategyEngine:
     def on_candle(self, c: Candle, oi_now: float = None):
         self._manage_open_legs(c)
         if self.a_enabled:
-            self.a.on_candle(c)
+            was_idle = self.a.state == "IDLE"
+            self.a.on_candle(c, oi_now=oi_now)
+            # A 트리거(T1)가 새로 발생 && B 포지션 보유 중이면 B의 TP2를 동적 전환
+            if was_idle and self.a.state == "CASCADE" and self._has_setup("B"):
+                for leg in self.open_legs:
+                    if leg.trade.setup == "B":
+                        leg.tp2 = c.close  # 청산 캐스케이드 발생 지점을 TP2로 재설정
+                        self.b.log.append((c.ts, f"A트리거 발생 -> B TP2를 {c.close:.1f}로 동적 전환"))
         if self.box_high is not None and self.b_enabled:
             self.b.on_candle(c, oi_now=oi_now)
 
