@@ -46,9 +46,12 @@ SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
 REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
 OI_DISPLAY_POLL_S = 60        # GUI 표시용 OI 폴링 주기 (엔진용 5분 폴링과 별개)
 CONDITIONS_POLL_S = 1         # 트리거 하위조건 체크리스트 갱신 주기 (실시간 표시용)
-REPLAY_LOOKBACK_S = 7200      # (재)시작 시 Setup A/B 감시 상태를 따라잡기 위해 재생할 과거 구간
-                              # CascadeBParams.box_window_min(기본 120분)과 같거나 더 길어야
-                              # 시작 직후부터 박스가 "이빨 빠지지 않고" 완전히 채워진다
+REPLAY_LOOKBACK_S = 7200      # (재)시작 시 Setup A/B 캐스케이드 감시 상태를 따라잡기 위해
+                              # 재생할 1분봉/OI 과거 구간
+REPLAY_5M_BARS = 150          # 5분봉 박스(120개 + 최근 12개 제외 = 132개 필요)를 시작 직후부터
+                              # 완전히 채우기 위해 재생할 5분봉 개수(여유분 포함)
+REPLAY_DAILY_DAYS = 150       # 일봉 레인지 압축 게이트(90일 lookback + 14일 ATR 창 = 최소 104일
+                              # 필요)를 시작 직후부터 완전히 채우기 위해 재생할 일봉 개수(여유분 포함)
 
 
 class LiveEngineRunner:
@@ -425,11 +428,17 @@ class LiveEngineRunner:
             self.bus.publish("candle_history", {"interval": interval, "candles": candles})
 
     def _replay_recent_history(self):
-        """(재)시작 시점 이전 REPLAY_LOOKBACK_S(기본 2시간)의 1분봉+OI를 실제 박스
-        계산 + Setup A/B 엔진 경로로 재생한다 — _backfill_history()는 차트 표시만
-        갱신하고 엔진 상태는 건드리지 않으므로, 이게 없으면 봇이 막 시작한 순간
-        이미 진행 중이던 박스 돌파나 캐스케이드를 완전히 놓친 채로 IDLE부터
-        다시 시작한다.
+        """(재)시작 시점 이전 과거 데이터를 실제 박스 계산 + Setup A/B 엔진 경로로
+        재생한다 — _backfill_history()는 차트 표시만 갱신하고 엔진 상태는 건드리지
+        않으므로, 이게 없으면 봇이 막 시작한 순간 이미 진행 중이던 박스 돌파나
+        캐스케이드를 완전히 놓친 채로 IDLE부터 다시 시작한다.
+
+        세 단계로 재생한다:
+        1) 일봉(REPLAY_DAILY_DAYS개) -> daily_regime(90일 레인지 압축 게이트) 시딩
+        2) 5분봉(REPLAY_5M_BARS개) -> 5분봉 박스(120개 중 최근 12개 제외) 시딩.
+           반드시 1)보다 나중에 재생해야 마지막 5분봉의 _update_5m_box()가
+           완전히 채워진 daily_regime을 보고 박스를 확정한다.
+        3) 1분봉+OI(REPLAY_LOOKBACK_S) -> Setup A/B 캐스케이드 감시 상태 재생.
 
         self.runner.on_kline_msg/on_oi_poll(라이브 웹소켓 메시지가 쓰는 것과 동일한
         진입점, 이미 _install_hooks()가 GUI 버스 발행까지 감싸둔 버전)을 그대로
@@ -440,6 +449,34 @@ class LiveEngineRunner:
         과거이력이 없지만 Setup A/B/C 전부 forceOrder 불필요 설계라 무관하다.
         """
         now_ms = time.time() * 1000
+
+        def _to_kline_msg(interval, k):
+            return {"k": {
+                "s": self.symbol, "i": interval, "x": True, "t": k[0],
+                "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
+            }}
+
+        # 1) 일봉 -> daily_regime 시딩 (오래된 것부터)
+        try:
+            raw_daily = bc.get_klines(self.symbol, interval="1d", limit=REPLAY_DAILY_DAYS)
+            for k in raw_daily:
+                if float(k[6]) > now_ms:
+                    continue  # 미확정(진행 중) 봉 제외
+                self.runner.on_kline_msg(_to_kline_msg("1d", k))
+        except Exception as e:
+            print(f"[replay] 일봉 재생 실패({e}) — 일봉 레인지 게이트 없이 시작합니다.", file=sys.stderr)
+
+        # 2) 5분봉 -> 5분봉 박스 시딩 (오래된 것부터)
+        try:
+            raw_5m = bc.get_klines(self.symbol, interval="5m", limit=REPLAY_5M_BARS)
+            for k in raw_5m:
+                if float(k[6]) > now_ms:
+                    continue
+                self.runner.on_kline_msg(_to_kline_msg("5m", k))
+        except Exception as e:
+            print(f"[replay] 5분봉 재생 실패({e}) — 5분봉 박스 없이 시작합니다.", file=sys.stderr)
+
+        # 3) 1분봉+OI -> Setup A/B 캐스케이드 감시 상태 재생
         start_ms = now_ms - REPLAY_LOOKBACK_S * 1000
 
         raw_klines = bc.get_klines(self.symbol, interval="1m", start_ms=int(start_ms), end_ms=int(now_ms), limit=1500)
