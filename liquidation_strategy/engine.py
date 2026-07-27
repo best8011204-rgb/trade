@@ -1,8 +1,11 @@
 """전략 엔진 — Setup A / B 트리거를 합치고 포지션 라이프사이클을 관리한다.
+둘 다 양방향(롱/숏)으로 진입할 수 있다 — Setup A/B 자체가 어느 쪽이든
+pending_signal["side"]로 알려주고, 이 파일은 그 값을 그대로 Trade.side에 반영할 뿐
+방향을 가정하지 않는다.
 
 명세서 3장 규칙:
   - B 포지션 보유 중 A 트리거 발생 시: B의 TP2를 청산 소진 시점으로 동적 전환
-  - A 롱 진입은 B 청산 완료 후에만 허용 (양방향 동시 보유 금지)
+  - A 진입은 B 청산 완료 후에만 허용 (셋업 단위 동시 보유 금지, 방향 무관)
 """
 
 from dataclasses import dataclass, field
@@ -52,7 +55,7 @@ class StrategyEngine:
     # 외부에서 매 캔들마다 박스(4h 레인지) 값을 갱신해준다고 가정
     def set_box(self, box_low: float, box_high: float):
         self.box_low, self.box_high = box_low, box_high
-        self.b.update_box(box_high)
+        self.b.update_box(box_low, box_high)
 
     def _has_side(self, side: Side) -> bool:
         return any(leg.trade.side == side for leg in self.open_legs)
@@ -123,11 +126,12 @@ class StrategyEngine:
 
     def _open_a(self, sig, c):
         p = self.a.p
+        side = Side.LONG if sig["side"] == "long" else Side.SHORT
         sl, tp1, tp2 = CascadeExhaustionLong.compute_exits(
-            sig["price"], sig["cascade_low"], sig["cascade_start_price"], p
+            sig["price"], sig["cascade_extreme"], sig["cascade_start_price"], p, side=sig["side"]
         )
         trade = Trade(
-            setup="A", side=Side.LONG, entry_ts=sig["ts"], entry_price=sig["price"],
+            setup="A", side=side, entry_ts=sig["ts"], entry_price=sig["price"],
             qty_fraction=1.0, tag=sig["tag"],
         )
         self.open_legs.append(OpenLeg(trade, sl, tp1, tp2, time_exit_ts=sig["ts"] + p.time_exit_s))
@@ -142,11 +146,12 @@ class StrategyEngine:
 
     def _open_b_tranche(self, sig, c, fraction):
         p = self.b.p
+        side = Side.LONG if sig["side"] == "long" else Side.SHORT
         sl, tp1, tp2 = TrappedLongFlushShort.compute_exits(
-            sig["price"], sig["sweep_high"], self.box_high, self.box_low, p
+            sig["price"], sig["sweep_extreme"], self.box_high, self.box_low, p, side=sig["side"]
         )
         trade = Trade(
-            setup="B", side=Side.SHORT, entry_ts=sig["ts"], entry_price=sig["price"],
+            setup="B", side=side, entry_ts=sig["ts"], entry_price=sig["price"],
             qty_fraction=fraction, tag=sig["tag"],
         )
         self.open_legs.append(OpenLeg(trade, sl, tp1, tp2, time_exit_ts=sig["ts"] + p.time_exit_s))
@@ -157,24 +162,31 @@ class StrategyEngine:
         for leg in self.open_legs:
             t = leg.trade
             closed = False
+            # 이 TP1은 "이미 열린 레그 하나"의 청산 비율이다(Setup A는 단일 진입이라
+            # a.p.tp1_fraction이 곧 이 값과 같다). Setup B의 tp1_fraction은 서로 다른
+            # 개념(트랜치1/트랜치2 "진입" 비율 분배)이라 여기 재사용하지 않고 기존처럼
+            # 0.5 고정 — 다만 어느 쪽이든 t.setup으로 판단해야 한다(방향으로 유추하면
+            # 안 됨). 양방향 확장 전에는 LONG=항상 A, SHORT=항상 B라서 방향으로 셋업을
+            # 유추해도 우연히 맞았지만, 이제 A/B 둘 다 롱·숏 모두 가능하다.
+            tp1_frac = self.a.p.tp1_fraction if t.setup == "A" else 0.5
             if t.side == Side.LONG:
                 if c.low <= leg.sl:
                     closed = self._close(leg, c.ts, leg.sl, "SL", t.qty_fraction)
                 elif not leg.tp1_hit and c.high >= leg.tp1:
-                    self._close(leg, c.ts, leg.tp1, "TP1", self.a.p.tp1_fraction if t.setup == "A" else 0.5)
+                    self._close(leg, c.ts, leg.tp1, "TP1", tp1_frac)
                     leg.tp1_hit = True
-                    leg.trade = Trade(**{**leg.trade.__dict__, "qty_fraction": 1 - (self.a.p.tp1_fraction if t.setup == "A" else 0.5)})
+                    leg.trade = Trade(**{**leg.trade.__dict__, "qty_fraction": 1 - tp1_frac})
                     still_open.append(leg)
                     continue
                 elif leg.tp1_hit and c.high >= leg.tp2:
                     closed = self._close(leg, c.ts, leg.tp2, "TP2", leg.trade.qty_fraction)
                 elif c.ts - t.entry_ts >= (leg.time_exit_ts - t.entry_ts) and c.ts >= leg.time_exit_ts:
                     closed = self._close(leg, c.ts, c.close, "TIME", leg.trade.qty_fraction)
-            else:  # SHORT (Setup B)
+            else:  # SHORT
                 if c.high >= leg.sl:
                     closed = self._close(leg, c.ts, leg.sl, "SL", t.qty_fraction)
                 elif not leg.tp1_hit and c.low <= leg.tp1:
-                    frac_now = leg.trade.qty_fraction * 0.5
+                    frac_now = leg.trade.qty_fraction * tp1_frac
                     self._close(leg, c.ts, leg.tp1, "TP1", frac_now)
                     leg.tp1_hit = True
                     leg.trade = Trade(**{**leg.trade.__dict__, "qty_fraction": leg.trade.qty_fraction - frac_now})
