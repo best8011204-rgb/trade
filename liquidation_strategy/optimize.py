@@ -2,7 +2,7 @@
 
 명세서 4장 각주: "캘리브레이션은 트리거 임계값 조정만 허용하고 진입/청산
 구조 변경은 불허." 이 원칙을 코드로 강제하기 위해, 최적화 대상은 감지
-임계값(vol_multiplier, min_move_pct, exhaustion_gap_s, rebound_pct,
+임계값(price_drop_atr_mult, oi_drop_quantile, rvol_quantile, rebound_pct,
 oi_increase_pct)으로 한정하고, 손절/목표/트랜치 비율 등 실행 구조는
 setup_a.py / setup_b.py / engine.py 에 고정된 채로 손대지 않는다.
 
@@ -17,9 +17,9 @@ from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams
 
 A_GRID = {
-    "vol_multiplier": [2.0, 3.0, 5.0],
-    "min_move_pct": [0.003, 0.004, 0.006],
-    "exhaustion_gap_s": [30.0, 45.0, 90.0],
+    "price_drop_atr_mult": [1.0, 1.5, 2.5],   # 구 vol_multiplier 대체(setup_a.py 재설계 — OI+거래량+ATR 프록시)
+    "oi_drop_quantile": [0.02, 0.05, 0.10],
+    "rvol_quantile": [0.85, 0.90, 0.95],
     "rebound_pct": [0.0005, 0.0008, 0.0015],
 }
 
