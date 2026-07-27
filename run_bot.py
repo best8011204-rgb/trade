@@ -5,6 +5,12 @@
 돌면서 신호/체결/현황을 텔레그램으로 알린다. config.json 의 live_trade 값은
 무시된다 (추후 실거래 재활성화 시 사용).
 
+Setup A/B/C 모두 구동하고(run_all.py의 GUI 경로와 기능 동등), 시작 시
+REST로 과거 일봉/5분봉/1분봉/OI를 재생해 계층형 박스(일봉 레짐 게이트+
+5분봉 박스)와 캐스케이드 감시 상태를 미리 채운 뒤 웹소켓 스트림에 붙는다.
+웹소켓이 확정봉을 놓쳐도 1분마다 REST로 보정하는 폴백도 GUI 경로와 동일하게
+동작한다.
+
 GUI까지 같이 보려면 이 파일 대신 `python3 run_all.py` 를 실행하면 된다 —
 run_all 이 GUI + 전략 엔진 + 텔레그램 봇을 한 프로세스에서 모두 구동한다.
 run_bot.py 는 화면 없는 서버/장시간 무인 운영용 대안이다.
@@ -22,9 +28,13 @@ import asyncio
 import sys
 
 from liquidation_strategy.bot_config import load_config
-from liquidation_strategy.live_feed import stream_loop, oi_poll_loop, snapshot_loop
+from liquidation_strategy.live_feed import (
+    stream_loop, oi_poll_loop, snapshot_loop, replay_recent_history, rest_kline_poll_loop,
+)
 from liquidation_strategy.live_trade import LiveTradingRunner
 from liquidation_strategy.telegram_bot import TelegramBot, BotState, CommandHandler
+from liquidation_strategy.setup_c import ParamsC
+from liquidation_strategy.live_setup_c import LiveSetupCRunner
 
 
 async def main_async(cfg):
@@ -52,13 +62,41 @@ async def main_async(cfg):
     state.apply_param_overrides(runner.engine)
     runner.paused = bool(state.data.get("paused"))
 
+    # Setup C: StrategyEngine과 독립 — run_all.py(GUI)와 동일하게 실제 5분봉
+    # 확정봉+OI를 그대로 받아 구동한다. 실주문 없음(A/B와 동일 원칙).
+    # (예전엔 헤드리스 경로에 아예 없어서 /status에 Setup C가 안 나왔었다.)
+    c_runner = LiveSetupCRunner(ParamsC())
+
+    def on_display_candle(interval, candle):
+        if interval == "5m" and candle.get("closed"):
+            c_runner.on_confirmed_5m_candle(candle)
+    runner.on_display_candle = on_display_candle
+
+    orig_on_oi_poll = runner.on_oi_poll
+
+    def on_oi_poll(oi_value, ts):
+        orig_on_oi_poll(oi_value, ts)
+        c_runner.on_oi(oi_value, ts)
+    runner.on_oi_poll = on_oi_poll
+
+    # run_all.py(GUI)와 동일하게, 라이브 스트림을 붙이기 전에 REST로 과거
+    # 일봉/5분봉/1분봉/OI를 재생해 계층형 박스(일봉 레짐 게이트+5분봉 박스)와
+    # Setup A/B 캐스케이드 감시 상태를 미리 채운다 — 이게 없으면 재시작할
+    # 때마다(PM2 크래시 재시작 포함) 완전 콜드 스타트로 시작해 일봉 게이트가
+    # 최소 45일치 쌓이기 전까진 박스가 아예 형성되지 않는다.
+    try:
+        replay_recent_history(runner, cfg["symbol"])
+    except Exception as e:
+        print(f"[replay] 실패({e}) — 재생 없이 라이브 스트림부터 시작합니다.", file=sys.stderr)
+
     tasks = [
         stream_loop(runner, cfg["symbol"]),
         oi_poll_loop(runner, cfg["symbol"]),
         snapshot_loop(runner),
+        rest_kline_poll_loop(runner, cfg["symbol"]),
     ]
     if bot:
-        handler = CommandHandler(runner, state)
+        handler = CommandHandler(runner, state, c_runner=c_runner)
         tasks.append(bot.poll_loop(handler.handle))
         bot.send(f"🤖 봇 시작 — {cfg['symbol'].upper()} · 페이퍼(실주문 비활성)\n"
                  "/help 로 명령 확인")

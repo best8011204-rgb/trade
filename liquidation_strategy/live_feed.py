@@ -47,6 +47,11 @@ KLINE_INTERVALS = ("1m", "5m", "1h", "1d")   # 1m=엔진+차트, 나머지=차�
 OI_POLL_S = 300              # 5분
 SNAPSHOT_EVERY_S = 60
 CANDLE_HISTORY_MAX = 3000    # 대시보드용으로 보관할 최근 분봉 수
+REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
+REPLAY_LOOKBACK_S = 7200      # (재)시작 시 Setup A/B 캐스케이드 감시 상태를 따라잡기 위해
+                              # 재생할 1분봉/OI 과거 구간
+REPLAY_5M_BARS = 150          # 5분봉 박스(120개+최근 12개 제외=132개 필요) 시딩용 여유(12.5시간)
+REPLAY_DAILY_DAYS = 150       # 일봉 레인지 게이트(90일 lookback+14일 ATR=최소 104일 필요) 시딩용 여유
 
 
 class LiveShadowRunner:
@@ -211,6 +216,126 @@ async def snapshot_loop(runner: LiveShadowRunner):
             runner.dump_snapshot()
         except Exception as e:
             print(f"[snapshot] error: {e}", file=sys.stderr)
+
+
+def replay_recent_history(runner: "LiveShadowRunner", symbol: str, stopping_event=None):
+    """(재)시작 시점 이전 과거 데이터를 실제 박스 계산 + Setup A/B 엔진 경로로
+    재생한다 — 웹소켓 라이브 스트림이 붙기 전에 호출해, 시작 직후부터 이미
+    진행 중이던 캐스케이드/박스 상태를 놓치지 않는다.
+
+    gui/live_engine_bridge.py(GUI)와 run_bot.py(헤드리스) 둘 다 이 함수 하나를
+    공유한다 — 예전엔 GUI 쪽에만 있어서 헤드리스 경로는 매번 완전 콜드
+    스타트로 시작했다(일봉 90일 레인지 게이트가 처음 채워지기까지 최소
+    45일, 5분봉 박스도 11시간 걸리는 문제 — run_bot.py가 크래시로 재시작될
+    때마다 이 워밍업이 처음부터 다시 반복됐었다).
+
+    runner.on_kline_msg/on_oi_poll(라이브 웹소켓 메시지가 쓰는 것과 동일한
+    진입점)을 그대로 재사용해 박스/포지션/로그가 실제 라이브 흐름과 똑같이
+    갱신되게 한다. stopping_event가 set되면 중간에 멈춘다.
+
+    세 단계로 재생한다:
+    1) 일봉(REPLAY_DAILY_DAYS개) -> 일봉 레인지 압축 게이트 시딩
+    2) 5분봉(REPLAY_5M_BARS개) -> 5분봉 박스(120개 중 최근 12개 제외) 시딩.
+       반드시 1)보다 나중에 재생해야 마지막 5분봉의 박스 계산이 완전히
+       채워진 일봉 게이트를 보고 박스를 확정한다.
+    3) 1분봉+OI(REPLAY_LOOKBACK_S) -> Setup A/B 캐스케이드 감시 상태 재생.
+    """
+    symbol_u = symbol.upper()
+    now_ms = time.time() * 1000
+
+    def _to_kline_msg(interval, k):
+        return {"k": {
+            "s": symbol_u, "i": interval, "x": True, "t": k[0],
+            "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
+        }}
+
+    try:
+        raw_daily = bc.get_klines(symbol_u, interval="1d", limit=REPLAY_DAILY_DAYS)
+        for k in raw_daily:
+            if float(k[6]) > now_ms:
+                continue  # 미확정(진행 중) 봉 제외
+            runner.on_kline_msg(_to_kline_msg("1d", k))
+    except Exception as e:
+        print(f"[replay] 일봉 재생 실패({e}) — 일봉 레인지 게이트 없이 시작합니다.", file=sys.stderr)
+
+    try:
+        raw_5m = bc.get_klines(symbol_u, interval="5m", limit=REPLAY_5M_BARS)
+        for k in raw_5m:
+            if float(k[6]) > now_ms:
+                continue
+            runner.on_kline_msg(_to_kline_msg("5m", k))
+    except Exception as e:
+        print(f"[replay] 5분봉 재생 실패({e}) — 5분봉 박스 없이 시작합니다.", file=sys.stderr)
+
+    start_ms = now_ms - REPLAY_LOOKBACK_S * 1000
+    raw_klines = bc.get_klines(symbol_u, interval="1m", start_ms=int(start_ms), end_ms=int(now_ms), limit=1500)
+    try:
+        raw_oi = bc.get_open_interest_hist(symbol_u, period="5m",
+                                            start_ms=int(start_ms), end_ms=int(now_ms), limit=500)
+    except Exception as e:
+        print(f"[replay] OI 이력 조회 실패({e}) — OI 없이 재생합니다.", file=sys.stderr)
+        raw_oi = []
+
+    events = []
+    for k in raw_klines:
+        if float(k[6]) > now_ms:
+            continue  # 미확정(진행 중) 봉 제외
+        events.append((k[0], 0, k))
+    for o in raw_oi:
+        events.append((float(o["timestamp"]), 1, o))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    if not events:
+        return
+    print(f"[replay] 최근 {REPLAY_LOOKBACK_S // 60}분 캔들/OI {len(events)}건 재생 중...", file=sys.stderr)
+    for _, kind, payload in events:
+        if stopping_event is not None and stopping_event.is_set():
+            return
+        if kind == 1:
+            runner.on_oi_poll(float(payload["sumOpenInterest"]), float(payload["timestamp"]) / 1000.0)
+        else:
+            runner.on_kline_msg(_to_kline_msg("1m", payload))
+    print(f"[replay] 완료 — Setup A/B가 최근 {REPLAY_LOOKBACK_S // 60}분의 박스/캐스케이드 상태를 반영합니다.",
+          file=sys.stderr)
+
+
+async def rest_kline_poll_loop(runner: "LiveShadowRunner", symbol: str, poll_s: float = REST_POLL_S):
+    """웹소켓이 막힌 환경 폴백: poll_s(기본 1분)마다 확정봉을 REST로 받아 동일
+    경로에 주입한다. gui/live_engine_bridge.py(GUI)와 run_bot.py(헤드리스)
+    둘 다 공유 — 예전엔 GUI 쪽에만 있어서 헤드리스 경로엔 이 안전망이 없었다.
+
+    - 각 타임프레임 최근 2봉을 조회해 '아직 처리 안 된 확정봉'만
+      runner.on_kline_msg(웹소켓과 동일한 메시지 형태)로 흘린다.
+    - 1m 중복 방지: runner.candles[-1].ts 이하는 스킵 (웹소켓이 정상이면
+      이 폴링은 사실상 아무 것도 주입하지 않는다).
+    """
+    symbol_u = symbol.upper()
+    loop = asyncio.get_running_loop()
+    last_ts = {iv: None for iv in KLINE_INTERVALS}
+    while True:
+        await asyncio.sleep(poll_s)
+        for iv in KLINE_INTERVALS:
+            try:
+                raw = await loop.run_in_executor(
+                    None, lambda iv=iv: bc.get_klines(symbol_u, interval=iv, limit=2))
+            except Exception as e:
+                print(f"[rest_poll] {iv} error: {e}", file=sys.stderr)
+                break  # 네트워크 문제면 이번 라운드 전체 스킵
+            now_ms = time.time() * 1000
+            for k in raw:
+                if float(k[6]) > now_ms:
+                    continue  # 미확정(진행 중) 봉 제외
+                ts = k[0] / 1000.0
+                if iv == "1m":
+                    if runner.candles and ts <= runner.candles[-1].ts:
+                        continue  # 웹소켓/이전 폴링이 이미 처리한 봉
+                elif last_ts[iv] is not None and ts <= last_ts[iv]:
+                    continue
+                last_ts[iv] = ts
+                runner.on_kline_msg({"k": {
+                    "s": symbol_u, "i": iv, "x": True, "t": k[0],
+                    "o": k[1], "h": k[2], "l": k[3], "c": k[4], "v": k[5],
+                }})
 
 
 def build_stream_names(symbol: str):
