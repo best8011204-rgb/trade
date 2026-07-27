@@ -18,8 +18,10 @@ from liquidation_strategy.setup_c import ParamsC
 
 
 class BotController:
-    def __init__(self, bus):
+    def __init__(self, bus, root=None):
         self.bus = bus
+        self.root = root  # Tk 루트 창 — LiveEngineRunner에 넘겨 텔레그램 /status
+                          # 화면 캡처에 쓴다(합성 모드 EngineRunner는 필요 없음).
         self.runner = None
         self.a_params = CascadeAParams()
         self.b_params = CascadeBParams()
@@ -64,6 +66,7 @@ class BotController:
             self.runner = LiveEngineRunner(
                 self.bus, symbol=symbol,
                 a_params=self.a_params, b_params=self.b_params, c_params=self.c_params,
+                root=self.root,
             )
         else:
             self.runner = EngineRunner(

@@ -80,13 +80,16 @@ async def main_async(cfg):
         trader=None, trade_usdt=float(cfg["trade_usdt"]), notify=notify,
         a_impl=a_impl,
     )
-    state.apply_param_overrides(runner.engine)
-    runner.paused = bool(state.data.get("paused"))
 
     # Setup C: StrategyEngine과 독립 — run_all.py(GUI)와 동일하게 실제 5분봉
     # 확정봉+OI를 그대로 받아 구동한다. 실주문 없음(A/B와 동일 원칙).
     # (예전엔 헤드리스 경로에 아예 없어서 /status에 Setup C가 안 나왔었다.)
+    # apply_param_overrides()가 Setup C의 저장된 /set 값도 복원해야 하므로
+    # c_runner는 반드시 그 호출보다 먼저 만든다.
     c_runner = LiveSetupCRunner(ParamsC())
+
+    state.apply_param_overrides(runner.engine, c_runner)
+    runner.paused = bool(state.data.get("paused"))
 
     def on_display_candle(interval, candle):
         if interval == "5m" and candle.get("closed"):

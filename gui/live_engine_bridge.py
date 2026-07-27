@@ -25,6 +25,8 @@ GUI(views/widgets)는 수정할 필요가 없다.
 """
 
 import asyncio
+import io
+import queue
 import sys
 import threading
 import time
@@ -52,9 +54,11 @@ class LiveEngineRunner:
     """LiveShadowRunner(asyncio)를 EventBus 세계로 감싸는 러너."""
 
     def __init__(self, bus, symbol="BTCUSDT", a_params=None, b_params=None, c_params=None,
-                 out_json="liquidation_strategy_output_live.json", log_dir="logs"):
+                 out_json="liquidation_strategy_output_live.json", log_dir="logs", root=None):
         self.bus = bus
         self.symbol = symbol.upper()
+        self.root = root  # Tk 루트 창(BotController가 넘겨줌) — 텔레그램 /status 화면 캡처용.
+                          # None이면(예: 향후 다른 진입점) 캡처 기능만 조용히 비활성화된다.
 
         # config.json 로드 (없으면 기본값) — 텔레그램 토큰/상태파일 공유
         self._cfg = load_config(quiet=True)
@@ -77,10 +81,14 @@ class LiveEngineRunner:
             state = BotState(self._cfg.get("state_file", "bot_state.json"))
             if self._cfg.get("telegram_chat_id"):
                 state.data["chat_id"] = int(self._cfg["telegram_chat_id"])
-            state.apply_param_overrides(self.runner.engine)   # /set 값 복원
+            state.apply_param_overrides(self.runner.engine, self.c_runner)   # /set 값 복원
             self.runner.paused = bool(state.data.get("paused"))
             self._tg_bot = TelegramBot(self._cfg["telegram_bot_token"], state)
-            self._tg_handler = CommandHandler(self.runner, state, bus=self.bus, c_runner=self.c_runner)
+            self._tg_handler = CommandHandler(
+                self.runner, state, bus=self.bus, c_runner=self.c_runner,
+                screenshot_fn=self._take_screenshot if self.root is not None else None,
+                send_photo_fn=self._tg_bot.send_photo,
+            )
             self.runner.notify = self._tg_bot.send
 
         self._loop = None
@@ -257,6 +265,35 @@ class LiveEngineRunner:
     def _cancel_all_tasks(self):
         for task in asyncio.all_tasks(self._loop):
             task.cancel()
+
+    def _take_screenshot(self) -> bytes:
+        """텔레그램 /status에서 호출 — GUI 창을 캡처해 PNG 바이트로 반환한다.
+        이 메서드 자체는 asyncio 루프 스레드(텔레그램 poll_loop)에서 동기적으로
+        불린다. Tk는 스레드세이프하지 않으므로 실제 캡처(창 좌표 읽기 +
+        ImageGrab)는 root.after(0, ...)로 Tk 메인 스레드에 위임하고, 그 결과를
+        queue로 기다린다(최대 5초 — Tk 메인 루프가 막혀 있으면 타임아웃으로
+        빠져나와 /status가 무한 대기하지 않게 한다)."""
+        if self.root is None:
+            raise RuntimeError("GUI 창 참조 없음")
+        result_q = queue.Queue()
+
+        def _capture():
+            try:
+                from PIL import ImageGrab
+                x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+                w, h = self.root.winfo_width(), self.root.winfo_height()
+                img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                result_q.put(("ok", buf.getvalue()))
+            except Exception as e:
+                result_q.put(("error", str(e)))
+
+        self.root.after(0, _capture)
+        kind, payload = result_q.get(timeout=5)
+        if kind == "error":
+            raise RuntimeError(payload)
+        return payload
 
     # ------------------------------------------------------------------
     def _thread_main(self):

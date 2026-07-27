@@ -3,3 +3,4 @@ pandas
 requests
 websockets
 python-socks[asyncio]  # ws_proxy에 socks5:// 프록시를 쓸 경우에만 필요
+Pillow  # run_all.py(GUI)의 텔레그램 /status 화면 캡처(ImageGrab)용 — run_bot.py(헤드리스)엔 불필요

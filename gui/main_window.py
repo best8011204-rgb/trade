@@ -27,7 +27,7 @@ class MainWindow:
         theme.apply_theme(self.root)
 
         self.bus = EventBus()
-        self.controller = BotController(self.bus)
+        self.controller = BotController(self.bus, root=self.root)
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True)
