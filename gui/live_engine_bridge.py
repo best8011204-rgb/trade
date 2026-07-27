@@ -356,20 +356,23 @@ class LiveEngineRunner:
                     }})
 
     async def _conditions_poll_loop(self):
-        """T1~T4(A)/T1~T3(B) 하위 조건 체크리스트를 실시간(1초 주기)으로
+        """T1~T4(A)/T1~T3(B)/C1~C2 하위 조건 체크리스트를 실시간(1초 주기)으로
         갱신한다. describe()의 상태 텍스트와 달리 conditions()는 시간 경과
-        자체가 조건(무청산 경과, 반등 유지 등)이라 캔들 틱(1분)만으로는 GUI가
-        갱신 시점 사이에 뒤처져 보인다 — 실제 벽시계 시간(time.time())으로
-        매초 재계산해 정확한 실시간 상태를 보여준다."""
+        자체가 조건(반등 유지 등)이라 캔들 틱(1분/5분)만으로는 GUI가 갱신
+        시점 사이에 뒤처져 보인다 — 실제 벽시계 시간(time.time())과 최신
+        체결틱 가격(self.runner.last_price)/OI로 매초 재계산해 정확한
+        실시간 상태(예: 현재 하락률이 몇 %인지)를 보여준다."""
         eng = self.runner.engine
         while True:
             await asyncio.sleep(CONDITIONS_POLL_S)
             try:
                 now = time.time()
+                price = self.runner.last_price
+                oi = self.runner._latest_oi
                 self.bus.publish("conditions", {
-                    "a_conditions": eng.a.conditions(now),
-                    "b_conditions": eng.b.conditions(now),
-                    "c_conditions": self.c_runner.last_conditions,
+                    "a_conditions": eng.a.conditions(now, current_price=price),
+                    "b_conditions": eng.b.conditions(now, current_price=price),
+                    "c_conditions": self.c_runner.live_conditions(price, oi),
                 })
             except Exception as e:
                 print(f"[conditions_poll] error: {e}", file=sys.stderr)
