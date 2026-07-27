@@ -6,11 +6,15 @@
   - 수익률:   본 모듈이 체결 내역을 트레이드별 표(CSV) + 요약 + 에쿼티로 변환
               (bps는 왕복비용 차감 후, R은 손절 거리 기준 위험단위)
 
-데이터 소스 3종:
+[재설계] Setup A가 forceOrder 없이 캔들+거래량+OI만으로 동작하도록 바뀌면서
+(setup_a.py 참고), klines+OI만 있으면 Setup A/B 둘 다 재현 가능해졌다.
+--source rest가 더 이상 "Setup B만"이 아니다.
+
+데이터 소스 2종:
   1) --source synthetic          합성 데이터 (파이프라인 검증용, 어디서나 동작)
-  2) --source rest --days 29     Binance 실데이터 klines+OI (Setup B만; 인터넷 필요)
-  3) --source replay             live_feed 가 녹화한 logs/raw_events.jsonl(forceOrder)
-                                 + klines CSV(선택: cvd 컬럼) + OI CSV -> Setup A/B 모두
+  2) --source rest --days 29     Binance 실데이터 klines+OI -> Setup A/B 모두 (인터넷 필요)
+  3) --source replay             klines CSV(선택: cvd 컬럼) + OI CSV -> Setup A/B 모두
+                                 (--source rest와 동일 로직, 로컬 CSV로 오프라인 재현할 때 사용)
 
 수익률 정의 (두 가지를 함께 보고, 혼동하지 않는다):
   - net_bps        포지션 명목가 기준 수익률(bp), 왕복비용 차감 후. 트랜치 비중 가중.
@@ -22,7 +26,7 @@
     python3 -m liquidation_strategy.analyze_returns --source synthetic
     python3 -m liquidation_strategy.analyze_returns --source rest --days 29
     python3 -m liquidation_strategy.analyze_returns --source replay \
-        --force-orders logs/raw_events.jsonl --klines data/klines_1m.csv --oi data/oi_5m.csv
+        --klines data/klines_1m.csv --oi data/oi_5m.csv
 
 출력:
     trades_report.csv                 트레이드별 진입/청산/수익률 표
@@ -36,7 +40,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from .data_types import Candle, OIPoint, ForceOrder
+from .data_types import Candle, OIPoint
 from .engine import StrategyEngine
 from .setup_a import CascadeAParams
 from .setup_b import CascadeBParams
@@ -116,34 +120,6 @@ def load_oi_csv(path):
     return pts
 
 
-def load_force_orders_jsonl(path, symbol="BTCUSDT"):
-    """live_feed 가 남긴 logs/raw_events.jsonl -> [ForceOrder].
-
-    각 줄: {"type": "forceOrder", ..., "o": {"s","S","p","ap","q","T", ...}}
-    """
-    fos = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            o = d.get("o") or d
-            if o.get("s") and o["s"] != symbol.upper():
-                continue
-            if not all(k in o for k in ("S", "q", "T")):
-                continue
-            fos.append(ForceOrder(
-                ts=_parse_ts(o["T"]), side=o["S"],
-                price=float(o.get("ap") or o.get("p")), qty=float(o["q"]),
-            ))
-    fos.sort(key=lambda x: x.ts)
-    return fos
-
-
 def build_box_series(candles, window_min=240):
     """backfill.py 와 동일한 4시간 롤링 박스."""
     closes = [c.close for c in candles]
@@ -155,37 +131,25 @@ def build_box_series(candles, window_min=240):
     return out
 
 
-def hourly_sell_baseline(force_orders, candles):
-    """녹화 구간 전체의 매도(SELL=롱청산) 시간당 평균 명목가 — Setup A T1 기준선."""
-    sells = [fo.notional for fo in force_orders if fo.side == "SELL"]
-    if not sells or not candles:
-        return None
-    hours = max((candles[-1].ts - candles[0].ts) / 3600.0, 1.0)
-    return sum(sells) / hours
-
-
 # ----------------------------------------------------------------------
 # 리플레이: 진입(셋업 트리거) -> 청산(엔진) 실행
 # ----------------------------------------------------------------------
-def replay(candles, oi_points, force_orders=None, a_params=None, b_params=None,
+def replay(candles, oi_points, a_params=None, b_params=None,
            macro_blackouts=None, cost_bps=10.0):
+    """candles+oi_points만으로 Setup A/B를 함께 구동한다 — Setup A가 forceOrder
+    없이 캔들+거래량+OI로 재설계된 이후 이 함수엔 forceOrder가 전혀 필요 없다."""
     engine = StrategyEngine(a_params or CascadeAParams(), b_params or CascadeBParams(),
                             macro_blackouts, cost_bps=cost_bps)
-    force_orders = force_orders or []
-    engine.a.set_hourly_baseline(hourly_sell_baseline(force_orders, candles))
 
     box_by_ts = {b[0]: (b[1], b[2]) for b in build_box_series(candles)}
 
     events = [(c.ts, 1, "candle", c) for c in candles]
-    events += [(fo.ts, -1, "fo", fo) for fo in force_orders]
     events += [(p.ts, 0, "oi", p) for p in oi_points]
     events.sort(key=lambda e: (e[0], e[1]))
 
     latest_oi = None
     for ts_, _, kind, payload in events:
-        if kind == "fo":
-            engine.on_force_order(payload)
-        elif kind == "oi":
+        if kind == "oi":
             latest_oi = payload.oi
             engine.on_oi(payload)
         else:
@@ -252,7 +216,8 @@ def print_summary(engine, cum_bps, equity, risk_pct=DEFAULT_RISK_PCT):
     print(f"\n전체 {n}건 | 누적 {cum_bps:.1f}bps (비중가중 합산)")
     print(f"고정리스크 복리 수익률 (트레이드당 위험 {risk_pct}%/R 가정): {(equity-1)*100:+.2f}%")
     if any(t.setup == "A" for t in engine.closed_trades) is False:
-        print("* Setup A 체결 없음 — forceOrder 데이터가 없으면 A 진입 탐지는 비활성입니다.")
+        print("* Setup A 체결 없음 — 이 구간엔 트리거 조건(가격급락+OI급감+RVOL)이 "
+              "충족되지 않은 것으로 보입니다.")
 
 
 # ----------------------------------------------------------------------
@@ -264,7 +229,6 @@ def main():
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--klines", help="replay: klines CSV (ts,open,high,low,close,volume[,cvd])")
     ap.add_argument("--oi", help="replay: OI CSV/JSON (ts,oi)")
-    ap.add_argument("--force-orders", help="replay: live_feed logs/raw_events.jsonl")
     ap.add_argument("--risk-pct", type=float, default=DEFAULT_RISK_PCT, help="트레이드당 계좌 위험 %% (1R)")
     ap.add_argument("--cost-bps", type=float, default=10.0)
     ap.add_argument("--trades-csv", default="trades_report.csv")
@@ -282,16 +246,15 @@ def main():
     elif args.source == "rest":
         from .backfill import fetch
         candles, oi_points = fetch(args.days, args.symbol)
-        engine = replay(candles, oi_points, force_orders=None, cost_bps=args.cost_bps)
-        meta_src = "binance_rest_real (Setup B만; forceOrder 과거이력 미제공)"
+        engine = replay(candles, oi_points, cost_bps=args.cost_bps)
+        meta_src = "binance_rest_real (Setup A/B 모두)"
     else:  # replay
         if not args.klines:
             ap.error("--source replay 에는 --klines 가 필요합니다")
         candles = load_klines_csv(args.klines)
         oi_points = load_oi_csv(args.oi) if args.oi else []
-        fos = load_force_orders_jsonl(args.force_orders, args.symbol) if args.force_orders else []
-        engine = replay(candles, oi_points, fos, cost_bps=args.cost_bps)
-        meta_src = f"replay (klines={args.klines}, oi={args.oi}, forceOrder={args.force_orders})"
+        engine = replay(candles, oi_points, cost_bps=args.cost_bps)
+        meta_src = f"replay (klines={args.klines}, oi={args.oi})"
 
     cum_bps, equity = write_trades_csv(engine.closed_trades, args.trades_csv, args.risk_pct)
     print_summary(engine, cum_bps, equity, args.risk_pct)
