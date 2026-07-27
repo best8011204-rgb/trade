@@ -120,8 +120,8 @@ def load_oi_csv(path):
     return pts
 
 
-def build_box_series(candles, window_min=240):
-    """backfill.py 와 동일한 4시간 롤링 박스 — "이번 봉 이전까지"의 고가/저가로
+def build_box_series(candles, window_min=120):
+    """backfill.py 와 동일한 롤링 박스 — "이번 봉 이전까지"의 고가/저가로
     계산한다(live_feed.py와 동일 원칙, close가 아니라 실제 윅 사용)."""
     highs = [c.high for c in candles]
     lows = [c.low for c in candles]

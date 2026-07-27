@@ -44,7 +44,6 @@ from .report import build_report
 STREAM_URL = "wss://fstream.binance.com/stream?streams={streams}"
 SYMBOL = "btcusdt"
 KLINE_INTERVALS = ("1m", "5m", "1h", "1d")   # 1m=엔진+차트, 나머지=차트 전용
-BOX_WINDOW_MIN = 240        # 4h 박스
 OI_POLL_S = 300              # 5분
 SNAPSHOT_EVERY_S = 60
 CANDLE_HISTORY_MAX = 3000    # 대시보드용으로 보관할 최근 분봉 수
@@ -124,14 +123,15 @@ class LiveShadowRunner:
             self.engine.a.on_cvd_delta(c.ts, self.cvd_accum)
             self.cvd_accum = 0.0
 
-            # 박스(직전 4시간 레인지)는 "이번 확정봉 이전"까지의 히스토리로 계산해야
-            # 한다. 이번 봉을 포함해서 계산하면, 이번 봉이 새 극값을 만드는 순간
-            # 그 값이 즉시 박스 경계 자체가 되어버려 "이번 봉이 박스를 돌파했는가"가
-            # 자기 자신과 비교하는 꼴이 되어 항상 False가 나온다 — 실제로 박스
-            # 하단/상단을 찍은 바로 그 봉에서는 돌파가 감지되지 않고, 그 다음 봉이
-            # 한 번 더 그 값을 넘어야만 감지되는 버그가 있었다.
+            # 박스(직전 box_window_min분 레인지, Setup B 파라미터로 /set 가능)는
+            # "이번 확정봉 이전"까지의 히스토리로 계산해야 한다. 이번 봉을 포함해서
+            # 계산하면, 이번 봉이 새 극값을 만드는 순간 그 값이 즉시 박스 경계
+            # 자체가 되어버려 "이번 봉이 박스를 돌파했는가"가 자기 자신과 비교하는
+            # 꼴이 되어 항상 False가 나온다 — 실제로 박스 하단/상단을 찍은 바로 그
+            # 봉에서는 돌파가 감지되지 않고, 그 다음 봉이 한 번 더 그 값을 넘어야만
+            # 감지되는 버그가 있었다.
             if self.candles:
-                window = list(self.candles)[-BOX_WINDOW_MIN:]
+                window = list(self.candles)[-self.engine.b.p.box_window_min:]
                 box_low = min(x.low for x in window)
                 box_high = max(x.high for x in window)
                 self.engine.set_box(box_low, box_high)

@@ -48,7 +48,7 @@ def fetch(days: int, symbol: str = SYMBOL):
     return candles, oi_points
 
 
-def build_box_series(candles, window_min=240):
+def build_box_series(candles, window_min=120):
     """"이번 봉 이전까지"의 고가/저가로 박스를 계산한다(live_feed.py와 동일 원칙).
     이번 봉을 포함해서 계산하면 그 봉이 만든 새 극값이 곧 박스 경계가 되어버려
     그 봉 자신의 돌파를 절대 감지할 수 없다. close가 아니라 실제 윅(high/low)을

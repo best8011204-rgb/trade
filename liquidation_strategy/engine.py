@@ -109,7 +109,7 @@ class StrategyEngine:
             self.a = CascadeExhaustionLong(params, self.a.macro_blackouts)
             self.a_enabled = True
         else:
-            self.b = TrappedLongFlushShort(params, self.b.box_lookback_s)
+            self.b = TrappedLongFlushShort(params)
             self.b_enabled = True
 
     # ------------------------------------------------------------------

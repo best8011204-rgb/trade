@@ -46,7 +46,9 @@ SUMMARY_EVERY_N_CANDLES = 5   # 1m 확정봉 N개마다 summary 발행
 REST_POLL_S = 60              # 웹소켓 폴백: 확정봉 REST 폴링 주기 (1분)
 OI_DISPLAY_POLL_S = 60        # GUI 표시용 OI 폴링 주기 (엔진용 5분 폴링과 별개)
 CONDITIONS_POLL_S = 1         # 트리거 하위조건 체크리스트 갱신 주기 (실시간 표시용)
-REPLAY_LOOKBACK_S = 3600      # (재)시작 시 Setup A/B 감시 상태를 따라잡기 위해 재생할 과거 구간
+REPLAY_LOOKBACK_S = 7200      # (재)시작 시 Setup A/B 감시 상태를 따라잡기 위해 재생할 과거 구간
+                              # CascadeBParams.box_window_min(기본 120분)과 같거나 더 길어야
+                              # 시작 직후부터 박스가 "이빨 빠지지 않고" 완전히 채워진다
 
 
 class LiveEngineRunner:
@@ -280,7 +282,7 @@ class LiveEngineRunner:
             self.bus.publish("status", {"running": False, "connected": False, "message": "정지됨"})
             return
 
-        # 1.5) 최근 REPLAY_LOOKBACK_S(기본 1시간) 재생: (재)시작 직전까지 이미 진행
+        # 1.5) 최근 REPLAY_LOOKBACK_S(기본 2시간) 재생: (재)시작 직전까지 이미 진행
         # 중이었을 수 있는 박스 돌파/캐스케이드를 놓치지 않기 위해, 차트용이 아니라
         # 실제 박스 계산 + Setup A/B 엔진 경로로 최근 1분봉+OI를 흘려보낸다.
         try:
@@ -423,7 +425,7 @@ class LiveEngineRunner:
             self.bus.publish("candle_history", {"interval": interval, "candles": candles})
 
     def _replay_recent_history(self):
-        """(재)시작 시점 이전 REPLAY_LOOKBACK_S(기본 1시간)의 1분봉+OI를 실제 박스
+        """(재)시작 시점 이전 REPLAY_LOOKBACK_S(기본 2시간)의 1분봉+OI를 실제 박스
         계산 + Setup A/B 엔진 경로로 재생한다 — _backfill_history()는 차트 표시만
         갱신하고 엔진 상태는 건드리지 않으므로, 이게 없으면 봇이 막 시작한 순간
         이미 진행 중이던 박스 돌파나 캐스케이드를 완전히 놓친 채로 IDLE부터

@@ -2,9 +2,9 @@
 돌파/트랩드숏 플러시 롱)
 
 명세서 2장의 T1~T3 트리거와 2트랜치 실행 규칙을 구현한 상태 머신.
-박스(4h 레인지) 상단 또는 하단 돌파 시도 -> OI 유입 확인 -> 트랩 확정 ->
-연료(미청산 OI) 확인 순서로 진행하며, 확정 시 `pending_signal`에 1차 진입
-정보를 채운다.
+박스(레인지, 기본 2시간 — CascadeBParams.box_window_min) 상단 또는 하단
+돌파 시도 -> OI 유입 확인 -> 트랩 확정 -> 연료(미청산 OI) 확인 순서로
+진행하며, 확정 시 `pending_signal`에 1차 진입 정보를 채운다.
 
 [양방향 확장] 상단 돌파(신규 롱 유입 함정 -> 숏 진입)와 하단 돌파(신규 숏
 유입 함정 -> 롱 진입)를 breakout_side("up"|"down")로 구분해 같은 상태머신이
@@ -18,6 +18,9 @@ from .data_types import Candle, OIPoint
 
 @dataclass
 class CascadeBParams:
+    box_window_min: int = 120          # 박스(레인지) 계산 창(분). 구 4시간(240분)에서 축소
+                                        # — 짧을수록 상단-하단 폭이 좁아져 돌파가 더 쉽게 잡힌다.
+                                        # live_feed.py 등 박스를 실제로 계산하는 쪽에서 이 값을 읽는다.
     oi_increase_pct: float = 0.006     # T1: 돌파 구간 OI 증가율 (양방향 공용)
     retest_window_s: float = 30 * 60   # T2: 재탈환 시도 허용 시간
     oi_return_tolerance: float = 0.002 # T3: '돌파 전 수준으로 회귀' 판정 오차
@@ -31,9 +34,8 @@ class CascadeBParams:
 class TrappedLongFlushShort:
     """T1~T3 감지 + 2트랜치 진입 관리 (양방향)."""
 
-    def __init__(self, params: CascadeBParams = None, box_lookback_s: float = 4 * 3600):
+    def __init__(self, params: CascadeBParams = None):
         self.p = params or CascadeBParams()
-        self.box_lookback_s = box_lookback_s
 
         self.state = "IDLE"  # IDLE -> BREAKOUT -> TRAP_CONFIRMED -> ARMED
         self.trap_id = 0
