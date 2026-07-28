@@ -63,9 +63,12 @@ class StrategyEngine:
         self.b.update_box(box_low, box_high)
 
     def clear_box(self):
-        """일봉 레짐이 "돌파 구간"이라 박스가 존재하지 않는 상태로 되돌린다.
-        on_candle()의 `if self.box_high is not None` 가드가 Setup B의 신규
-        트리거 탐지를 자동으로 멈춘다 — 이미 보유 중인 포지션 관리는 영향 없음."""
+        """5분봉 히스토리가 아직 부족해(콜드 스타트 워밍업 중) 박스를 계산할
+        수 없는 상태로 되돌린다. on_candle()의 `if self.box_high is not None`
+        가드가 Setup B의 신규 트리거 탐지를 자동으로 멈춘다 — 이미 보유 중인
+        포지션 관리는 영향 없음. (2026-07부터 일봉 레짐이 "돌파 구간"이라는
+        이유만으로는 더 이상 호출되지 않는다 — setup_b.HierarchicalBoxBuilder
+        참고.)"""
         self.box_low, self.box_high = None, None
         self.b.box_low, self.b.box_high = None, None
 

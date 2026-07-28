@@ -11,22 +11,19 @@
 동시에 감시한다. T1(OI 증가 확인)은 방향과 무관하게 동일한 계산식을 쓴다 —
 신규 포지션이 들어오면 어느 방향이든 OI가 늘어나기 때문이다.
 
-[계층형 박스] 박스는 두 단계로 결정된다 (실제 계산은 live_feed.py가 담당,
-이 파일은 계산된 box_low/box_high를 받아 쓰기만 한다):
-  1) 일봉 레짐 게이트(DailyBoxRegime, 아래) — 최근 box_daily_lookback_days일의
-     일봉으로 "지금이 레인지(응축) 구간인가 추세(돌파) 구간인가"만 판정한다.
-     레인지 구간이 아니면(=일봉 기준 박스가 존재하지 않으면) 신규 트리거를
-     찾지 않는다("돌파 구간"). 90일 동안 응축 구간이 여러 번 나타났다 사라졌다
-     할 수 있으므로 "박스가 여러 개 선정될 수 있다"는 요구사항은 이 게이트의
-     자연스러운 결과다 — 각 응축 구간이 곧 하나의 '일봉 박스'다.
-  2) 5분봉 박스 — 실제 상단/하단 값은 5분봉 120개(가장 최근 12개는 제외,
-     13~120번째 봉만 사용)로 계산한다. 최근 봉을 박스 형성에서 빼는 이유는
-     지금 막 형성 중인 가격 움직임 자체가 박스 경계를 만들어버려 그 움직임의
-     돌파 여부를 자기 자신과 비교하는 문제(이전 버그)를 원천적으로 피하기
-     위함이다 — 1시간의 안전 여유를 둔 것.
-  일봉 레짐이 "돌파 구간"이면 box_low/box_high가 아예 None으로 유지되고,
-  아래 on_candle()의 첫 줄(`if self.box_high is None: return`)이 신규 트리거
-  탐지를 자동으로 멈춘다(기존 열린 포지션 관리는 영향 없음).
+[박스] 실제 상단/하단 값은 5분봉 120개(가장 최근 12개는 제외, 13~120번째
+봉만 사용)로 계산한다(HierarchicalBoxBuilder, 아래). 최근 봉을 박스 형성
+에서 빼는 이유는 지금 막 형성 중인 가격 움직임 자체가 박스 경계를 만들어
+버려 그 움직임의 돌파 여부를 자기 자신과 비교하는 문제(이전 버그)를
+원천적으로 피하기 위함이다 — 1시간의 안전 여유를 둔 것.
+
+[일봉 레짐 게이트] DailyBoxRegime은 최근 box_daily_lookback_days일의 일봉
+으로 "지금이 레인지(응축) 구간인가 추세(돌파) 구간인가"를 계산은 하지만,
+더 이상 박스 값을 지우는 데 쓰지 않는다(2026-07 변경 — 예전엔 "돌파
+구간"일 때 박스를 None으로 만들어 T1 신규 트리거 탐지 자체를 멈췄는데,
+정작 진짜 돌파가 일어나는 국면에 감시가 멈추는 역효과였다). 지금은 5분봉
+박스가 항상 유지되고, "가격이 실제로 그 박스 선을 넘는지"로만 T1을
+판정한다 — 레인지 구간이든 돌파 구간이든 동일하다.
 """
 
 from collections import deque
@@ -123,6 +120,17 @@ class HierarchicalBoxBuilder:
         self._recompute()
 
     def _recompute(self):
+        """5분봉 120개(최근 12개 제외, 13~120번째) 박스를 계산한다.
+
+        [2026-07 변경] 예전에는 daily_regime.is_range_regime()이 False(돌파
+        구간)면 여기서 박스를 아예 None으로 지워버렸고, 그 결과
+        TrappedLongFlushShort.on_candle()의 `if self.box_high is None: return`
+        가드가 신규 트리거 탐지 자체를 막아버렸다 — 실제로는 "박스 상/하단
+        돌파" 조건이 가장 의미 있는 순간(진짜 돌파 국면)에 정작 감시가
+        멈추는 역효과였다. 지금은 5분봉 박스 값을 일봉 레짐과 무관하게
+        항상 유지하고, 기존과 동일하게 "가격이 실제로 그 선을 넘는지"로만
+        T1을 판정한다 — daily_regime/is_range_regime()은 계산은 계속하지만
+        (추후 표시/분석용으로 남겨둠) 더 이상 박스 값 자체를 지우지 않는다."""
         p = self.p
         n = len(self.candles_5m)
         end = n - p.box_5m_exclude_recent
@@ -131,12 +139,8 @@ class HierarchicalBoxBuilder:
             self.box_low = self.box_high = None
             return
         window = list(self.candles_5m)[start:end]
-        box_low = min(x[1] for x in window)
-        box_high = max(x[0] for x in window)
-        if self.daily_regime.is_range_regime(p):
-            self.box_low, self.box_high = box_low, box_high
-        else:
-            self.box_low = self.box_high = None
+        self.box_low = min(x[1] for x in window)
+        self.box_high = max(x[0] for x in window)
 
 
 def compute_box_series_from_feeds(candles_1m, daily_feed, five_min_feed, params: CascadeBParams):
