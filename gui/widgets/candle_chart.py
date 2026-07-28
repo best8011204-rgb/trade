@@ -32,7 +32,8 @@ DOWN_COLOR = "#f6465d"  # Binance red
 BG_COLOR = "#161a1e"
 GRID_COLOR = "#2b3139"
 TEXT_COLOR = "#848e9c"
-BOX_COLOR = "#f0b90b"   # Binance yellow(주황) — Setup B 4h 박스 상/하단
+BOX_COLOR = "#f0b90b"   # Binance yellow(주황) — Setup B 5분봉 박스 상/하단
+BOX_C2_COLOR = "#00bcd4"  # 청록(cyan) — Setup C2 코일 박스 상/하단 (Setup B와 별개)
 OI_COLOR = "#f0b90b"    # OI 라인 (Binance 지표 골드)
 OI_FILL = "#3a3420"     # OI 영역 채움 (골드 저채도)
 OI_PANEL_FRAC = 0.24    # 캔버스 높이 중 OI 서브패널 비중
@@ -72,7 +73,8 @@ class CandleChart(ttk.Frame):
         self._bars = {iv: [] for iv in INTERVALS}          # 확정봉 목록
         self._forming = {iv: None for iv in INTERVALS}     # 집계 중 미확정 봉 (합성 모드)
         self._has_native = {iv: False for iv in INTERVALS} # 네이티브 봉 수신 여부
-        self._box = (None, None)                            # (box_low, box_high)
+        self._box = (None, None)                            # (box_low, box_high) — Setup B
+        self._box_c2 = (None, None)                          # (box_low, box_high) — Setup C2 (별개)
         self._oi = []                                       # [(ts, oi)] 시간순
         self._legs = []                                      # 보유 포지션 [{sl, tp1, tp2, ...}]
         self._watch = {"a": None, "b": None}                # Setup A/B가 주시 중인 참고가
@@ -129,6 +131,12 @@ class CandleChart(ttk.Frame):
 
     def set_box(self, box_low, box_high):
         self._box = (box_low, box_high)
+        self._mark_dirty()
+
+    def set_box_c2(self, box_low, box_high):
+        """Setup C2(코일 박스) — Setup B의 5분봉 박스(set_box)와 완전히
+        별개 값이다. C2가 COIL/BREAKOUT_PENDING 상태가 아니면 (None, None)."""
+        self._box_c2 = (box_low, box_high)
         self._mark_dirty()
 
     def set_legs(self, open_legs):
@@ -229,6 +237,11 @@ class CandleChart(ttk.Frame):
             y_min = min(y_min, bl)
         if bh is not None:
             y_max = max(y_max, bh)
+        c2l, c2h = self._box_c2
+        if c2l is not None:
+            y_min = min(y_min, c2l)
+        if c2h is not None:
+            y_max = max(y_max, c2h)
         # SL/TP/관찰 레벨도 화면 밖으로 벗어나지 않게 범위에 포함
         extra_levels = [v for v in self._watch.values() if v is not None]
         for leg in self._legs:
@@ -264,11 +277,18 @@ class CandleChart(ttk.Frame):
             cv.create_text(W - PAD_R + 6, y, text=f"{p:,.1f}", fill=TEXT_COLOR,
                            anchor="w", font=("Arial", 8))
 
-        # 4h 박스 상/하단 (주황 점선, Setup B가 돌파를 감시하는 레인지)
+        # 5분봉 박스 상/하단 (주황 점선, Setup B가 돌파를 감시하는 레인지)
         for p, lbl in ((bh, "박스상단(B)"), (bl, "박스하단(B)")):
             if p is not None and y_min <= p <= y_max:
                 cv.create_line(PAD_L, Y(p), W - PAD_R, Y(p), fill=BOX_COLOR, dash=(4, 3))
                 cv.create_text(W - PAD_R + 6, Y(p), text=lbl, fill=BOX_COLOR,
+                               anchor="w", font=("Arial", 8))
+
+        # Setup C2 코일 박스 상/하단 (청록 점선, Setup B와 별개 — COIL/BREAKOUT_PENDING일 때만 존재)
+        for p, lbl in ((c2h, "박스상단(C2)"), (c2l, "박스하단(C2)")):
+            if p is not None and y_min <= p <= y_max:
+                cv.create_line(PAD_L, Y(p), W - PAD_R, Y(p), fill=BOX_C2_COLOR, dash=(2, 2))
+                cv.create_text(W - PAD_R + 6, Y(p), text=lbl, fill=BOX_C2_COLOR,
                                anchor="w", font=("Arial", 8))
 
         # Setup A/B가 포지션 진입 전 주시 중인 참고가 (청록/핑크 점선)

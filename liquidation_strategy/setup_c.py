@@ -452,8 +452,17 @@ def conditions_c2(f: pd.DataFrame, i: int, state: C2State, p: ParamsC) -> list[d
                     "met": bool(np.isfinite(row["vol_med_c2"]) and np.isfinite(row["vol_med_c2_qlo"])
                                 and row["vol_med_c2"] <= row["vol_med_c2_qlo"]),
                     "detail": f"{row['vol_med_c2']:.2f}" if np.isfinite(row["vol_med_c2"]) else "N/A"})
-    elif state.state == "BREAKOUT_PENDING":
-        out.append({"key": "c2_dir", "label": "돌파 방향", "met": True, "detail": state.breakout_side})
+    elif state.state in ("COIL", "BREAKOUT_PENDING"):
+        # COIL/BREAKOUT_PENDING 모두 박스가 존재하는 상태인데, 예전엔 여기서
+        # 박스 값 자체를 어디에도 안 보여줬다(Setup B는 상/하단을 보여주는데
+        # C2만 상태 이름만 나오고 실제 값이 안 보이던 문제).
+        gap_hi = (row["close"] - state.box_high) / state.box_high * 100
+        gap_lo = (row["close"] - state.box_low) / state.box_low * 100
+        out.append({"key": "c2_box", "label": "C2 박스 상/하단", "met": True,
+                    "detail": f"상단 {state.box_high:,.1f}({gap_hi:+.2f}%) / "
+                              f"하단 {state.box_low:,.1f}({gap_lo:+.2f}%)"})
+        if state.state == "BREAKOUT_PENDING":
+            out.append({"key": "c2_dir", "label": "돌파 방향", "met": True, "detail": state.breakout_side})
     return out
 
 

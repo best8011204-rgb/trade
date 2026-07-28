@@ -10,11 +10,13 @@ StrategyEngine/LiveEngineRunner/EventBus/live_feed 쪽 로직은 전혀 건드�
           중앙 weight=1: 차트 / 우 380px 고정: 포지션(위)·성과(아래)
     row2  하단 상태바(고정) — 상세 상태 메시지
 
-구독 토픽 (기존과 동일, 데이터 흐름 변경 없음):
-- "candle":         1m 확정봉 (가격/박스 갱신 + 합성 모드 차트 집계 입력)
+구독 토픽:
+- "candle":         1m 확정봉 (가격/Setup B 박스 갱신 + 합성 모드 차트 집계 입력)
 - "candle_tf":      라이브 모드의 타임프레임별(1m/5m/1h/1d) 네이티브 봉
                     (진행 중인 봉 포함, 1m 수신 시마다 가격도 갱신)
 - "candle_history": 라이브 시작 시 REST 백필
+- "c2_box":         Setup C2 코일 박스(Setup B의 박스와 별개, COIL/
+                    BREAKOUT_PENDING일 때만 존재) — 차트에 별도 선으로 표시
 - "oi"/"oi_history": OI 포인트 / 히스토리
 - "intent":         Setup A/B/C 대기 요약 텍스트 + 참고가
 - "conditions":     T1~T4(A)/T1~T3(B)/G1~G4(C) 하위 조건 체크리스트
@@ -58,6 +60,7 @@ class DashboardPage:
 
         bus.subscribe("status", self._on_status)
         bus.subscribe("candle", self._on_candle)
+        bus.subscribe("c2_box", self._on_c2_box)
         bus.subscribe("candle_tf", self._on_candle_tf)
         bus.subscribe("candle_history", self._on_candle_history)
         bus.subscribe("oi", self._on_oi)
@@ -196,6 +199,11 @@ class DashboardPage:
                 "close": data["close"], "volume": data.get("volume", 0.0),
                 "closed": True,
             })
+
+    def _on_c2_box(self, data):
+        """Setup C2 코일 박스 — Setup B의 5분봉 박스(_on_candle)와 완전히
+        별개 값이라 차트에 별도 선(청록)으로 그린다."""
+        self.chart.set_box_c2(data.get("box_low"), data.get("box_high"))
 
     def _on_position(self, data):
         self.positions.update_positions(data)

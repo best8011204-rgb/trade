@@ -121,6 +121,7 @@ class LiveEngineRunner:
                 self._flush_signals()
                 self._publish_position()
                 self._publish_intent()
+                self._publish_c2_box()
         self.runner.on_display_candle = on_display_candle
 
         # 2) 1m 확정봉 처리 후 -> 기존 토픽("candle"/"position"/"summary") 발행
@@ -184,6 +185,17 @@ class LiveEngineRunner:
             "b_text": b_text, "b_level": b_level,
             "c_text": self.c_runner.describe(), "c_level": None,
         })
+
+    def _publish_c2_box(self):
+        """Setup C2(코일 박스)는 Setup B의 5분봉 박스와 완전히 별개 값이라
+        차트에 별도 선으로 그려야 한다 — COIL/BREAKOUT_PENDING 상태일 때만
+        box_low/high가 존재하고, 그 외(IDLE)에는 None으로 초기화해 차트에서
+        이전 박스 잔상이 안 남게 한다."""
+        st = self.c_runner.c2_state
+        if st.state in ("COIL", "BREAKOUT_PENDING"):
+            self.bus.publish("c2_box", {"box_low": st.box_low, "box_high": st.box_high})
+        else:
+            self.bus.publish("c2_box", {"box_low": None, "box_high": None})
 
     def _flush_trades(self):
         trades = self.runner.engine.closed_trades

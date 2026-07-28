@@ -148,6 +148,11 @@ class EngineRunner:
                     "b_conditions": engine.b.conditions(c.ts, current_price=c.close),
                     "c_conditions": self.c_runner.live_conditions(c.close, latest_oi),
                 })
+                c2_state = self.c_runner.c2_state
+                if c2_state.state in ("COIL", "BREAKOUT_PENDING"):
+                    self.bus.publish("c2_box", {"box_low": c2_state.box_low, "box_high": c2_state.box_high})
+                else:
+                    self.bus.publish("c2_box", {"box_low": None, "box_high": None})
                 if candle_count % SUMMARY_EVERY_N_CANDLES == 0:
                     s = engine.summary()
                     s["C"] = self.c_runner.combined_summary()
