@@ -160,7 +160,8 @@ class StrategyEngine:
         # CascadeExhaustionLong.compute_exits였다면 a_impl이 무엇이든 항상 기본
         # 구현의 산식이 쓰여 잘못된 SL/TP가 나왔을 것이다).
         sl, tp1, tp2 = type(self.a).compute_exits(
-            sig["price"], sig["cascade_extreme"], sig["cascade_start_price"], p, side=sig["side"]
+            sig["price"], sig["cascade_extreme"], sig["cascade_start_price"], p,
+            side=sig["side"], sig=sig,
         )
         trade = Trade(
             setup="A", side=side, entry_ts=sig["ts"], entry_price=sig["price"],

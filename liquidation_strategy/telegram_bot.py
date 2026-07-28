@@ -490,15 +490,36 @@ class CommandHandler:
         if name not in field_map:
             return f"'{name}' 파라미터가 없습니다. /params 로 이름을 확인하세요."
         old = getattr(p, name)
-        try:
-            val = int(raw) if isinstance(old, int) and not isinstance(old, bool) else float(raw)
-        except ValueError:
-            return f"값 '{raw}' 을 숫자로 변환할 수 없습니다."
+        val = self._cast_value(old, raw)
+        if val is None:
+            return (f"값 '{raw}' 을 '{type(old).__name__}' 타입으로 변환할 수 없습니다."
+                    + (" bool은 true/false로 입력하세요." if isinstance(old, bool) else ""))
         setattr(p, name, val)
         self.state.data["params"].setdefault(setup, {})[name] = val
         self.state.save()
         self._log(f"/set {setup} {name}: {old} → {val}")
         return f"✅ Setup {setup.upper()} {name}: {old} → {val} (즉시 적용, 재시작에도 유지)"
+
+    @staticmethod
+    def _cast_value(old, raw: str):
+        """기존 값의 타입에 맞춰 문자열을 캐스팅. 변환 실패 시 None.
+
+        bool은 int의 서브클래스라 반드시 먼저 검사해야 한다 — 이 순서가
+        아니면 bool 필드가 float(raw) 경로로 빠져 'true'는 ValueError,
+        '1'은 1.0(float)이 되어 파라미터 타입이 오염된다."""
+        try:
+            if isinstance(old, bool):
+                s = raw.strip().lower()
+                if s in ("1", "true", "on", "yes", "y"):
+                    return True
+                if s in ("0", "false", "off", "no", "n"):
+                    return False
+                return None
+            if isinstance(old, int):
+                return int(raw)
+            return float(raw)
+        except ValueError:
+            return None
 
     def _set_bulk(self, setup: str, args) -> str:
         """/seta, /setb, /setc — "이름=값" 토큰 여러 개를 한 번에 적용한다.
@@ -521,10 +542,10 @@ class CommandHandler:
             if name not in field_map:
                 return f"'{name}' 파라미터가 없습니다. /params 로 이름을 확인하세요."
             old = getattr(p, name)
-            try:
-                val = int(raw) if isinstance(old, int) and not isinstance(old, bool) else float(raw)
-            except ValueError:
-                return f"값 '{raw}' 을 숫자로 변환할 수 없습니다 ({name})."
+            val = self._cast_value(old, raw)
+            if val is None:
+                return (f"값 '{raw}' 을 '{type(old).__name__}' 타입으로 변환할 수 없습니다 ({name})."
+                        + (" bool은 true/false로 입력하세요." if isinstance(old, bool) else ""))
             updates.append((name, old, val))
 
         for name, _old, val in updates:

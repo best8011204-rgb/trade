@@ -512,9 +512,13 @@ class CascadeExhaustionLong:
 
     @staticmethod
     def compute_exits(entry_price: float, cascade_extreme: float, cascade_start_price: float,
-                       p: CascadeAParams, side: str = "long"):
+                       p: CascadeAParams, side: str = "long", sig: dict = None):
         """side="long": 캐스케이드 저점 기준 위쪽 되돌림(기존과 동일).
-        side="short": 캐스케이드 고점 기준 아래쪽 되돌림(거울상)."""
+        side="short": 캐스케이드 고점 기준 아래쪽 되돌림(거울상).
+
+        sig: engine.py가 다형 호출 시 넘기는 진입 신호 dict. 이 구현은
+        아직 쓰지 않지만(v2 ATR 손익구조는 setup_a_legacy에 먼저 적용),
+        시그니처 호환을 위해 받아둔다 — 없으면 TypeError로 GUI 경로가 죽는다."""
         move = abs(cascade_start_price - cascade_extreme)
         if side == "long":
             sl = cascade_extreme * (1 - p.sl_buffer_pct)
